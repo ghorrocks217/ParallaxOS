@@ -61,6 +61,9 @@ kernel/process/ProcessManager.o: kernel/process/ProcessManager.cpp include/proce
 kernel/memory/AddressSpace.o: kernel/memory/AddressSpace.cpp include/memory/address_space.h
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
+kernel/cpu/usermode.o: kernel/cpu/usermode.asm
+	nasm -f elf32 $< -o $@
+
 os.img: boot.bin stage2.bin kernel.bin
 	cat boot.bin stage2.bin kernel.bin > $@
 	truncate -s 1M $@
