@@ -8,8 +8,6 @@ extern int copy_user_string(
     unsigned capacity
 );
 
-extern void task_yield(void);
-
 int syscall_handler(
     unsigned int number,
     unsigned int arg1,
@@ -31,8 +29,8 @@ int syscall_handler(
         }
 
         case SYS_YIELD:
-            task_yield();
-            return 0;
+            kprintf("[syscall] SYS_YIELD is unavailable until user scheduling is implemented\n");
+            return -1;
 
         case SYS_EXIT:
             kprintf("[syscall] SYS_EXIT is not implemented yet\n");

@@ -11,8 +11,6 @@
 
 extern void *kmalloc(unsigned n);
 
-static unsigned user_kernel_stack_top;
-
 /* Build (32-bit freestanding): see the Makefile. Flags used:
  *   gcc -m32 -ffreestanding -fno-builtin -fno-pic -fno-pie -fno-stack-protector \
  *       -fno-asynchronous-unwind-tables -fno-tree-loop-distribute-patterns \
@@ -727,10 +725,8 @@ static void user_mode_test(void) {
         0xBB, 0x00, 0x01, 0x40, 0x00,
         0xCD, 0x80,
 
-        /* Repeatedly call SYS_YIELD */
-        0xB8, 0x02, 0x00, 0x00, 0x00,
-        0xCD, 0x80,
-        0xEB, 0xF7
+        /* Infinite loop. No unsafe SYS_YIELD yet. */
+        0xEB, 0xFE
     };
 
     static const char message[] = "Hello from isolated Ring 3!\n";
@@ -772,35 +768,30 @@ static void user_mode_test(void) {
 
     kprintf("Entering isolated Ring 3...\n");
 
-    __asm__ volatile(
-        "cli\n\t"
+    void *kernel_stack = kmalloc(STACK_SIZE);
 
-        "mov $0x23, %%ax\n\t"
-        "mov %%ax, %%ds\n\t"
-        "mov %%ax, %%es\n\t"
-        "mov %%ax, %%fs\n\t"
-        "mov %%ax, %%gs\n\t"
+    if (!kernel_stack)
+        panic("could not allocate user kernel stack");
 
-        "push $0x23\n\t"
-        "push %0\n\t"
+    unsigned kernel_stack_top =
+        (unsigned)kernel_stack + STACK_SIZE;
 
-        "pushf\n\t"
-        "pop %%eax\n\t"
-        "or $0x200, %%eax\n\t"
-        "push %%eax\n\t"
+    /* The CPU uses this stack when Ring 3 enters the kernel. */
+    tss_set_stack(kernel_stack_top);
 
-        "push $0x1B\n\t"
-        "push %1\n\t"
+    /*
+     * Temporarily mask the PIT IRQ.
+     * The existing scheduler cannot safely switch Ring 3 contexts yet.
+     */
+    outb(0x21, inb(0x21) | 0x01);
 
-        "iret\n\t"
+    kprintf("Entering isolated Ring 3...\n");
 
-        :
-        : "r"(USER_STACK + PAGE),
-          "r"(USER_CODE)
-        : "eax", "memory"
+    enter_user_mode(
+        USER_CODE,
+        USER_STACK + PAGE,
+        kernel_stack_top
     );
-
-    __builtin_unreachable();
 }
 
 /* =====================================================================
