@@ -5,6 +5,13 @@
 #include "process/syscall.h"
 #include "process/process.h"
 #include "memory/address_space.h"
+#include "cpu/usermode.h"
+
+#define STACK_SIZE 8192
+
+extern void *kmalloc(unsigned n);
+
+static unsigned user_kernel_stack_top;
 
 /* Build (32-bit freestanding): see the Makefile. Flags used:
  *   gcc -m32 -ffreestanding -fno-builtin -fno-pic -fno-pie -fno-stack-protector \
@@ -699,6 +706,7 @@ unsigned paging_translate_user(
 #define USER_CODE  0x00400000
 #define USER_STACK 0xBFFFF000
 
+
 static void user_mode_test(void) __attribute__((noreturn));
 
 static void user_mode_test(void) {
@@ -902,11 +910,11 @@ enum { T_FREE = 0, T_READY, T_DEAD, T_SLEEPING, T_BLOCKED };
 
 struct task {
     int state;
-    unsigned esp;                   /* saved stack pointer while not running */
-    void *stack;                    /* kmalloc'd stack (0 for the shell task) */
+    unsigned esp;
+    void *stack;
     void (*fn)(void *);
     void *arg;
-    unsigned wake;                  /* tick to wake at (T_SLEEPING) */
+    unsigned wake;
     char name[16];
 };
 
@@ -962,15 +970,19 @@ static int task_create(const char *name, void (*fn)(void *), void *arg) {
 /* Called from the timer interrupt (interrupts are off).
  * Must NOT call kfree/kmalloc here: those call irq_restore() which would
  * re-enable interrupts mid-ISR. Stacks are freed via kfree_raw() directly. */
+
 static void schedule(void) {
     if (!current) return;
 
-    /* wake sleepers whose time has come (signed compare: tick wraparound safe) */
-    for (int i = 0; i < MAX_TASKS; i++)
-        if (tasks[i].state == T_SLEEPING && (int)(ticks - tasks[i].wake) >= 0)
+    /* Wake sleeping tasks. */
+    for (int i = 0; i < MAX_TASKS; i++) {
+        if (tasks[i].state == T_SLEEPING &&
+            (int)(ticks - tasks[i].wake) >= 0) {
             tasks[i].state = T_READY;
+        }
+    }
 
-    /* free the stacks of finished tasks (never the one we're running on) */
+    /* Reclaim finished tasks that are not currently running. */
     for (int i = 1; i < MAX_TASKS; i++) {
         if (tasks[i].state == T_DEAD && &tasks[i] != current) {
             kfree_raw(tasks[i].stack);
@@ -980,17 +992,30 @@ static void schedule(void) {
     }
 
     int cur = (int)(current - tasks);
+
     for (int i = 1; i <= MAX_TASKS; i++) {
         int n = (cur + i) % MAX_TASKS;
-        if (tasks[n].state != T_READY) continue;
-        if (&tasks[n] == current) return;       /* nothing else to run */
+
+        if (tasks[n].state != T_READY)
+            continue;
+
+        if (&tasks[n] == current)
+            return;
 
         struct task *prev = current;
         current = &tasks[n];
-        /* ring-3 -> ring-0 entries must land on the new task's kernel stack
-         * (the shell task has no kmalloc'd stack: it uses the boot stack) */
-        tss_set_stack(current->stack ? (unsigned)current->stack + STACK_SIZE
-                                     : BOOT_STACK_TOP);
+
+        unsigned kernel_stack_top;
+
+        if (current->stack) {
+            kernel_stack_top =
+                (unsigned)current->stack + STACK_SIZE;
+        } else {
+            kernel_stack_top = BOOT_STACK_TOP;
+        }
+
+        tss_set_stack(kernel_stack_top);
+
         switch_context(&prev->esp, current->esp);
         return;
     }
