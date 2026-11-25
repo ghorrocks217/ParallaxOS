@@ -18,8 +18,9 @@ CXXFLAGS = -m32 -ffreestanding -fno-builtin -fno-pic -fno-pie \
          -fno-asynchronous-unwind-tables
 
 LDFLAGS = -m elf_i386 --oformat binary
-# 32 sectors * 512 bytes
-KERNEL_MAX = 16384
+
+# 64 sectors * 512 bytes
+KERNEL_MAX = 32768
 
 all: os.img
 

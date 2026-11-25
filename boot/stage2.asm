@@ -3,7 +3,7 @@
 
 KERNEL_SEG     equ 0x1000       ; loaded at 0x1000:0000 = 0x10000
 KERNEL_LBA     equ 5            ; LBA 0 = stage1, 1-4 = stage2, 5.. = kernel
-KERNEL_SECTORS equ 32           ; 32 KB: raise if kernel.bin grows
+KERNEL_SECTORS equ 64           ; 32 KB: raise if kernel.bin grows
 
 stage2_start:
     cli
