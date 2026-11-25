@@ -39,8 +39,8 @@ kernel/%.o: kernel/%.cpp
 serial.o: kernel/drivers/serial.c include/drivers/serial.h
 	$(CC) $(CFLAGS) -c $< -o $@
 
-kernel.bin: entry.o kernel.o serial.o kernel/cpu/gdt.o kernel/cpu/idt.o linker.ld
-	$(LD) $(LDFLAGS) -T linker.ld -o kernel.bin entry.o kernel.o serial.o kernel/cpu/gdt.o kernel/cpu/idt.o
+kernel.bin: entry.o kernel.o serial.o kernel/cpu/gdt.o kernel/cpu/idt.o kernel/process/syscall.o linker.ld
+	$(LD) $(LDFLAGS) -T linker.ld -o kernel.bin entry.o kernel.o serial.o kernel/cpu/gdt.o kernel/cpu/idt.o kernel/process/syscall.o
 
 kernel/cpu/gdt.o: kernel/cpu/gdt.c include/cpu/gdt.h
 	$(CC) $(CFLAGS) -c kernel/cpu/gdt.c -o kernel/cpu/gdt.o
@@ -48,6 +48,8 @@ kernel/cpu/gdt.o: kernel/cpu/gdt.c include/cpu/gdt.h
 kernel/cpu/idt.o: kernel/cpu/idt.c include/cpu/idt.h
 	$(CC) $(CFLAGS) -c kernel/cpu/idt.c -o $@
 
+kernel/process/syscall.o: kernel/process/syscall.c include/process/syscall.h
+	$(CC) $(CFLAGS) -c $< -o $@
 os.img: boot.bin stage2.bin kernel.bin
 	cat boot.bin stage2.bin kernel.bin > $@
 	truncate -s 1M $@
@@ -56,6 +58,6 @@ run: os.img
 	qemu-system-i386 -drive format=raw,file=os.img
 
 clean:
-	rm -f *.bin *.o kernel/cpu/*.o os.img
+	rm -f *.bin *.o kernel/cpu/*.o kernel/process/*.o os.img
 
 .PHONY: all run clean

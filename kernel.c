@@ -2,6 +2,7 @@
 #include "drivers/serial.h"
 #include "cpu/gdt.h"
 #include "cpu/idt.h"
+#include "process/syscall.h"
 
 /* Build (32-bit freestanding): see the Makefile. Flags used:
  *   gcc -m32 -ffreestanding -fno-builtin -fno-pic -fno-pie -fno-stack-protector \
@@ -844,7 +845,7 @@ static void read_line(void) {
     }
 }
 
-static int copy_user_string(char *dst, unsigned src, unsigned capacity) {
+int copy_user_string(char *dst, unsigned src, unsigned capacity) {
     if (!dst || !capacity)
         return 0;
 
@@ -882,27 +883,11 @@ static int copy_user_string(char *dst, unsigned src, unsigned capacity) {
 /* ---------- interrupt dispatch ---------- */
 void isr_handler(struct regs *r) {
     if (r->int_no == 128) {
-        switch (r->eax) {
-            case 1: {
-                char buffer[256];
-
-                if (!copy_user_string(buffer, r->ebx, sizeof(buffer))) {
-                    kprintf("[syscall] Invalid user string pointer\n");
-                    r->eax = (unsigned)-1;
-                    break;
-                }
-
-                kprintf("%s", buffer);
-                r->eax = 0;
-                break;
-            }
-
-            default:
-                kprintf("Unknown syscall: %u\n", r->eax);
-                r->eax = (unsigned)-1;
-                break;
-        }
-
+        r->eax = (unsigned)syscall_handler(
+            r->eax,
+            r->ebx,
+            r->ecx
+        );
         return;
     }
     if (r->int_no >= 32) {
