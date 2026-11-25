@@ -1,0 +1,16 @@
+# Compiled object files
+*.o
+
+# Compiled binaries
+*.bin
+*.com
+
+# Disk images
+*.img
+
+# Assembly listings
+*.lst
+
+# Editor files
+.vscode/
+.idea/

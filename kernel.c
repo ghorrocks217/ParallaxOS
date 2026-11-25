@@ -1,4 +1,5 @@
 #include <stdarg.h>
+#include "drivers/serial.h"
 
 /* Build (32-bit freestanding): see the Makefile. Flags used:
  *   gcc -m32 -ffreestanding -fno-builtin -fno-pic -fno-pie -fno-stack-protector \
@@ -52,23 +53,6 @@ NO_LOOP_IDIOM void *memcpy(void *d, const void *s, unsigned n) {
     return d;
 }
 
-/* ---------- serial port (COM1) logging ---------- */
-#define COM1 0x3F8
-
-static void serial_init(void) {
-    outb(COM1 + 1, 0x00);   /* no UART interrupts */
-    outb(COM1 + 3, 0x80);   /* enable divisor latch */
-    outb(COM1 + 0, 0x01);   /* divisor 1 = 115200 baud */
-    outb(COM1 + 1, 0x00);
-    outb(COM1 + 3, 0x03);   /* 8 bits, no parity, 1 stop */
-    outb(COM1 + 2, 0xC7);   /* enable FIFO */
-    outb(COM1 + 4, 0x0B);
-}
-
-static void serial_putc(char c) {
-    for (int spin = 0; spin < 100000; spin++)   /* bounded: a missing UART can't hang us */
-        if (inb(COM1 + 5) & 0x20) { outb(COM1, c); return; }
-}
 
 /* ---------- VGA text terminal ---------- */
 #define VGA ((volatile unsigned short *)0xB8000)
@@ -107,8 +91,8 @@ static void clear(void) {
 /* No locking and no cursor update: callers handle both.
  * Everything printed is mirrored to the serial port. */
 static void kputc_raw(char c) {
-    if (c == '\n') serial_putc('\r');
-    serial_putc(c);
+    if (c == '\n') serial_putchar('\r');
+    serial_putchar(c);
 
     if (c == '\n')      { col = 0; row++; }
     else if (c == '\r') { col = 0; }
