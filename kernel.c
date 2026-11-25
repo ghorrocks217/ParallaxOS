@@ -6,6 +6,7 @@
 #include "process/process.h"
 #include "memory/address_space.h"
 #include "cpu/usermode.h"
+#include "fs/vfs.h"
 
 #define STACK_SIZE 8192
 
@@ -1300,8 +1301,114 @@ void isr_handler(struct regs *r) {
     for (;;) __asm__ volatile("cli; hlt");
 }
 
-/* ---------- shell ---------- */
-static void prompt(void) { kputs("os> "); }
+/* ---------- filesystem shell support ---------- */
+
+static char current_directory[VFS_PATH_MAX] = "/";
+
+static unsigned fs_strlen(const char *s) {
+    unsigned n = 0;
+    while (s && s[n]) ++n;
+    return n;
+}
+
+/* Convert relative paths into normalized absolute paths. */
+static int resolve_path(
+    const char *input,
+    char *output,
+    unsigned capacity
+) {
+    if (!input || !*input || !output || capacity < 2)
+        return 0;
+
+    char combined[VFS_PATH_MAX * 2];
+
+    unsigned pos = 0;
+
+    if (input[0] == '/') {
+        while (input[pos] && pos < sizeof(combined) - 1) {
+            combined[pos] = input[pos];
+            ++pos;
+        }
+    } else {
+        unsigned cwd_len = fs_strlen(current_directory);
+
+        for (unsigned i = 0; i < cwd_len; ++i)
+            combined[pos++] = current_directory[i];
+
+        if (pos > 1)
+            combined[pos++] = '/';
+
+        unsigned i = 0;
+
+        while (input[i] && pos < sizeof(combined) - 1)
+            combined[pos++] = input[i++];
+
+        if (input[i])
+            return 0;
+    }
+
+    if (input[0] == '/' && input[pos] != '\0')
+        return 0;
+
+    combined[pos] = '\0';
+
+    output[0] = '/';
+    output[1] = '\0';
+
+    unsigned out_len = 1;
+    unsigned i = 1;
+
+    while (combined[i]) {
+        while (combined[i] == '/')
+            ++i;
+
+        if (!combined[i])
+            break;
+
+        unsigned start = i;
+
+        while (combined[i] && combined[i] != '/')
+            ++i;
+
+        unsigned length = i - start;
+
+        if (length == 1 && combined[start] == '.')
+            continue;
+
+        if (length == 2 &&
+            combined[start] == '.' &&
+            combined[start + 1] == '.') {
+            if (out_len > 1) {
+                while (out_len > 1 && output[out_len - 1] != '/')
+                    --out_len;
+                output[out_len] = '\0';
+            }
+
+            continue;
+        }
+
+        if (out_len > 1) {
+            if (out_len + 1 >= capacity)
+                return 0;
+
+            output[out_len++] = '/';
+        }
+
+        if (out_len + length >= capacity)
+            return 0;
+
+        for (unsigned j = 0; j < length; ++j)
+            output[out_len++] = combined[start + j];
+
+        output[out_len] = '\0';
+    }
+
+    return 1;
+}
+
+static void prompt(void) {
+    kprintf("os:%s> ", current_directory);
+}
 
 static void cmd_meminfo(void) {
     unsigned f = irq_save();                /* heap list must not change under us */
@@ -1469,6 +1576,209 @@ static void cmd_procs(void) {
     }
 }
 
+static void cmd_ls(const char *argument) {
+    char path[VFS_PATH_MAX];
+
+    if (!resolve_path(
+            argument && *argument ? argument : ".",
+            path,
+            sizeof(path))) {
+        kputs("invalid path\n");
+        return;
+    }
+
+    struct vfs_dirent entries[16];
+
+    int count = vfs_list(path, entries, 16);
+
+    if (count < 0) {
+        kputs("not a directory\n");
+        return;
+    }
+
+    unsigned shown = count < 16 ? (unsigned)count : 16;
+
+    for (unsigned i = 0; i < shown; ++i) {
+        kprintf(
+            "%s %s",
+            entries[i].type == VFS_DIRECTORY ? "[DIR] " : "[FILE]",
+            entries[i].name
+        );
+
+        if (entries[i].type == VFS_FILE)
+            kprintf(" (%u bytes)", entries[i].size);
+
+        kputc('\n');
+    }
+
+    if (count > 16)
+        kprintf("... and %u more entries\n", (unsigned)count - 16);
+}
+
+static void cmd_cd(const char *argument) {
+    char path[VFS_PATH_MAX];
+
+    if (!resolve_path(
+            argument && *argument ? argument : "/",
+            path,
+            sizeof(path))) {
+        kputs("invalid path\n");
+        return;
+    }
+
+    if (!vfs_is_directory(path)) {
+        kputs("directory does not exist\n");
+        return;
+    }
+
+    unsigned i = 0;
+
+    while (path[i] && i < sizeof(current_directory) - 1) {
+        current_directory[i] = path[i];
+        ++i;
+    }
+
+    current_directory[i] = '\0';
+}
+
+static void cmd_mkdir(const char *argument) {
+    char path[VFS_PATH_MAX];
+
+    if (!resolve_path(argument, path, sizeof(path))) {
+        kputs("invalid path\n");
+        return;
+    }
+
+    if (!vfs_mkdir(path))
+        kputs("could not create directory\n");
+    else
+        kputs("directory created\n");
+}
+
+static void cmd_touch(const char *argument) {
+    char path[VFS_PATH_MAX];
+
+    if (!resolve_path(argument, path, sizeof(path))) {
+        kputs("invalid path\n");
+        return;
+    }
+
+    if (vfs_exists(path)) {
+        kputs("already exists\n");
+        return;
+    }
+
+    if (!vfs_create(path))
+        kputs("could not create file\n");
+    else
+        kputs("file created\n");
+}
+
+static void cmd_cat(const char *argument) {
+    char path[VFS_PATH_MAX];
+    char buffer[VFS_FILE_MAX];
+
+    if (!resolve_path(argument, path, sizeof(path))) {
+        kputs("invalid path\n");
+        return;
+    }
+
+    int size = vfs_read(path, buffer, sizeof(buffer));
+
+    if (size < 0) {
+        kputs("could not read file\n");
+        return;
+    }
+
+    for (int i = 0; i < size; ++i)
+        kputc(buffer[i]);
+
+    if (!size || buffer[size - 1] != '\n')
+        kputc('\n');
+}
+
+static void cmd_write(char *argument) {
+    while (*argument == ' ')
+        ++argument;
+
+    if (!*argument) {
+        kputs("usage: write <file> <text>\n");
+        return;
+    }
+
+    char *path_argument = argument;
+
+    while (*argument && *argument != ' ')
+        ++argument;
+
+    if (!*argument) {
+        kputs("usage: write <file> <text>\n");
+        return;
+    }
+
+    *argument++ = '\0';
+
+    while (*argument == ' ')
+        ++argument;
+
+    char path[VFS_PATH_MAX];
+
+    if (!resolve_path(path_argument, path, sizeof(path))) {
+        kputs("invalid path\n");
+        return;
+    }
+
+    if (!vfs_exists(path)) {
+        if (!vfs_create(path)) {
+            kputs("could not create file\n");
+            return;
+        }
+    }
+
+    if (vfs_is_directory(path)) {
+        kputs("cannot write to a directory\n");
+        return;
+    }
+
+    unsigned size = fs_strlen(argument);
+
+    if (size > VFS_FILE_MAX) {
+        kputs("file is too large (maximum 512 bytes)\n");
+        return;
+    }
+
+    if (!vfs_write(path, argument, size))
+        kputs("write failed\n");
+    else
+        kputs("file written\n");
+}
+
+static void cmd_rm(const char *argument) {
+    char path[VFS_PATH_MAX];
+
+    if (!resolve_path(argument, path, sizeof(path))) {
+        kputs("invalid path\n");
+        return;
+    }
+
+    if (fs_strlen(path) == fs_strlen(current_directory)) {
+        unsigned i = 0;
+
+        while (path[i] && path[i] == current_directory[i])
+            ++i;
+
+        if (!path[i] && !current_directory[i]) {
+            kputs("cannot remove your current directory\n");
+            return;
+        }
+    }
+
+    if (!vfs_remove(path))
+        kputs("could not remove entry (directory may not be empty)\n");
+    else
+        kputs("removed\n");
+}
+
 static void run_command(char *input) {
     while (*input == ' ') input++;
     if (!*input) return;
@@ -1497,7 +1807,15 @@ static void run_command(char *input) {
               "  reboot          restart the machine\n"
               "  usermode        run a Ring 3 test program\n"
               "  procs           list user processes\n"
-              "  vmtest          test virtual address-space isolation\n");
+              "  vmtest          test virtual address-space isolation\n"
+              "  ls [path]       list directory contents\n"
+              "  cd [path]       change directory\n"
+              "  pwd             print current directory\n"
+              "  mkdir <path>    create directory\n"
+              "  touch <file>    create empty file\n"
+              "  cat <file>      display file contents\n"
+              "  write <file> <text>  write text to file\n"
+              "  rm <path>       remove file or empty directory\n");
     } else if (streq(cmd, "clear")) {
         clear();
     } else if (streq(cmd, "echo")) {
@@ -1562,6 +1880,22 @@ static void run_command(char *input) {
         cmd_procs();
     } else if (streq(cmd, "vmtest")) {
         cmd_vmtest();
+    } else if (streq(cmd, "pwd")) {
+        kprintf("%s\n", current_directory);
+    } else if (streq(cmd, "ls")) {
+        cmd_ls(args);
+    } else if (streq(cmd, "cd")) {
+        cmd_cd(args);
+    } else if (streq(cmd, "mkdir")) {
+        cmd_mkdir(args);
+    } else if (streq(cmd, "touch")) {
+        cmd_touch(args);
+    } else if (streq(cmd, "cat")) {
+        cmd_cat(args);
+    } else if (streq(cmd, "write")) {
+        cmd_write(args);
+    } else if (streq(cmd, "rm")) {
+        cmd_rm(args);
     } else {
         kprintf("unknown command: %s (try 'help')\n", cmd);
     }
@@ -1580,6 +1914,7 @@ void kmain(void) {
     vmm_init();
     timer_init();
     process_manager_init();
+    vfs_init();
 
     /* The code we're running right now becomes task 0 */
     tasks[0].state = T_READY;
