@@ -429,6 +429,17 @@ unsigned paging_kernel_directory(void) {
     return (unsigned)page_dir;
 }
 
+unsigned paging_active_directory(void) {
+    unsigned directory;
+
+    __asm__ volatile(
+        "mov %%cr3, %0"
+        : "=r"(directory)
+    );
+
+    return directory & 0xFFFFF000;
+}
+
 /* Switch the active page directory by loading CR3. */
 void paging_switch_directory(unsigned directory) {
     if (!directory)
@@ -697,16 +708,11 @@ static void user_mode_test(void) {
     if (!code_page || !stack_page)
         panic("could not allocate user pages");
 
-    /*
-     * Machine code:
-     *
-     * mov eax, 1
-     * mov ebx, 0x00400100
-     * int 0x80
-     * jmp $
-     *
-     * The string is stored at offset 0x100.
-     */
+    address_space space;
+
+    if (!address_space_create(&space))
+        panic("could not create process address space");
+
     static const unsigned char user_program[] = {
         0xB8, 0x01, 0x00, 0x00, 0x00,
         0xBB, 0x00, 0x01, 0x40, 0x00,
@@ -714,7 +720,7 @@ static void user_mode_test(void) {
         0xEB, 0xFE
     };
 
-    static const char message[] = "Hello from Ring 3!\n";
+    static const char message[] = "Hello from isolated Ring 3!\n";
 
     memset((void *)code_page, 0, PAGE);
     memset((void *)stack_page, 0, PAGE);
@@ -722,14 +728,21 @@ static void user_mode_test(void) {
     memcpy((void *)code_page, user_program, sizeof(user_program));
     memcpy((void *)(code_page + 0x100), message, sizeof(message));
 
-    vmm_map(USER_CODE, code_page, PTE_W | PTE_U);
-    vmm_map(USER_STACK, stack_page, PTE_W | PTE_U);
+    if (!address_space_map_user(
+            &space, USER_CODE, code_page, PTE_W)) {
+        panic("could not map user code");
+    }
+
+    if (!address_space_map_user(
+            &space, USER_STACK, stack_page, PTE_W)) {
+        panic("could not map user stack");
+    }
 
     int pid = process_create(
         "ring3-demo",
         USER_CODE,
         USER_STACK + PAGE,
-        (unsigned)page_dir
+        space.directory
     );
 
     if (pid < 0)
@@ -737,9 +750,14 @@ static void user_mode_test(void) {
 
     process_set_state((unsigned)pid, PROCESS_RUNNING);
 
-    kprintf("Starting process %u in Ring 3...\n", (unsigned)pid);
+    kprintf("Created process %u\n", (unsigned)pid);
+    kprintf("Kernel directory: %x\n",
+            address_space_kernel_directory());
+    kprintf("Process directory: %x\n", space.directory);
 
-    kprintf("Entering Ring 3...\n");
+    address_space_activate(&space);
+
+    kprintf("Entering isolated Ring 3...\n");
 
     __asm__ volatile(
         "cli\n\t"
@@ -1135,24 +1153,26 @@ int copy_user_string(char *dst, unsigned src, unsigned capacity) {
     if (!dst || !capacity)
         return 0;
 
+    unsigned directory = paging_active_directory();
+    unsigned *dir = (unsigned *)directory;
+
     for (unsigned i = 0; i < capacity - 1; i++) {
         unsigned addr = src + i;
 
-        // Detect address overflow.
         if (addr < src)
             return 0;
 
         unsigned di = addr >> 22;
         unsigned ti = (addr >> 12) & 0x3FF;
 
-        // The page directory entry must exist and be user-accessible.
-        if (!(page_dir[di] & PTE_P) || !(page_dir[di] & PTE_U))
+        if (!(dir[di] & PTE_P) || !(dir[di] & PTE_U))
             return 0;
 
-        unsigned *pt = (unsigned *)(page_dir[di] & 0xFFFFF000);
-        unsigned pte = pt[ti];
+        unsigned *table =
+            (unsigned *)(dir[di] & 0xFFFFF000);
 
-        // The page table entry must also be user-accessible.
+        unsigned pte = table[ti];
+
         if (!(pte & PTE_P) || !(pte & PTE_U))
             return 0;
 
