@@ -42,8 +42,8 @@ kernel/%.o: kernel/%.cpp
 serial.o: kernel/drivers/serial.c include/drivers/serial.h
 	$(CC) $(CFLAGS) -c $< -o $@
 
-kernel.bin: entry.o kernel.o serial.o kernel/cpu/gdt.o kernel/cpu/idt.o kernel/process/syscall.o kernel/process/ProcessManager.o linker.ld
-	$(LD) $(LDFLAGS) -T linker.ld -o kernel.bin entry.o kernel.o serial.o kernel/cpu/gdt.o kernel/cpu/idt.o kernel/process/syscall.o kernel/process/ProcessManager.o
+kernel.bin: entry.o kernel.o serial.o kernel/cpu/gdt.o kernel/cpu/idt.o kernel/process/syscall.o kernel/process/ProcessManager.o kernel/memory/AddressSpace.o linker.ld
+	$(LD) $(LDFLAGS) -T linker.ld -o kernel.bin entry.o kernel.o serial.o kernel/cpu/gdt.o kernel/cpu/idt.o kernel/process/syscall.o kernel/process/ProcessManager.o kernel/memory/AddressSpace.o
 	@test $$(stat -c%s kernel.bin) -le $(KERNEL_MAX) || (echo "Kernel exceeds $(KERNEL_MAX)-byte bootloader limit"; exit 1)
 
 kernel/cpu/gdt.o: kernel/cpu/gdt.c include/cpu/gdt.h
@@ -58,6 +58,9 @@ kernel/process/syscall.o: kernel/process/syscall.c include/process/syscall.h
 kernel/process/ProcessManager.o: kernel/process/ProcessManager.cpp include/process/process.h
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
+kernel/memory/AddressSpace.o: kernel/memory/AddressSpace.cpp include/memory/address_space.h
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
 os.img: boot.bin stage2.bin kernel.bin
 	cat boot.bin stage2.bin kernel.bin > $@
 	truncate -s 1M $@
@@ -66,6 +69,6 @@ run: os.img
 	qemu-system-i386 -drive format=raw,file=os.img
 
 clean:
-	rm -f *.bin *.o kernel/cpu/*.o kernel/process/*.o os.img
+	rm -f *.bin *.o kernel/cpu/*.o kernel/memory/*.o kernel/process/*.o os.img
 
 .PHONY: all run clean
