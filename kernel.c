@@ -714,10 +714,15 @@ static void user_mode_test(void) {
         panic("could not create process address space");
 
     static const unsigned char user_program[] = {
+        /* SYS_WRITE(0x00400100) */
         0xB8, 0x01, 0x00, 0x00, 0x00,
         0xBB, 0x00, 0x01, 0x40, 0x00,
         0xCD, 0x80,
-        0xEB, 0xFE
+
+        /* Repeatedly call SYS_YIELD */
+        0xB8, 0x02, 0x00, 0x00, 0x00,
+        0xCD, 0x80,
+        0xEB, 0xF7
     };
 
     static const char message[] = "Hello from isolated Ring 3!\n";
@@ -991,6 +996,13 @@ static void schedule(void) {
     }
 }
 
+/* Voluntary scheduler entry point.
+ * May be called from a syscall with interrupts already disabled. */
+void task_yield(void) {
+    unsigned flags = irq_save();
+    schedule();
+    irq_restore(flags);
+}
 /* Sleeps without burning CPU: the task leaves the run queue until its wake
  * tick, then schedule() flips it back to READY. Saves/restores the caller's
  * interrupt flag, so it never returns with IF changed. */

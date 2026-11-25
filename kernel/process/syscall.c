@@ -1,14 +1,20 @@
-
 #include "process/syscall.h"
 
 extern void kprintf(const char *format, ...);
-extern int copy_user_string(char *destination,
-                            unsigned source,
-                            unsigned capacity);
 
-int syscall_handler(unsigned int number,
-                    unsigned int arg1,
-                    unsigned int arg2) {
+extern int copy_user_string(
+    char *destination,
+    unsigned source,
+    unsigned capacity
+);
+
+extern void task_yield(void);
+
+int syscall_handler(
+    unsigned int number,
+    unsigned int arg1,
+    unsigned int arg2
+) {
     (void)arg2;
 
     switch (number) {
@@ -24,11 +30,11 @@ int syscall_handler(unsigned int number,
             return 0;
         }
 
+        case SYS_YIELD:
+            task_yield();
+            return 0;
+
         case SYS_EXIT:
-            /*
-             * Process termination will be implemented
-             * when the process manager exists.
-             */
             kprintf("[syscall] SYS_EXIT is not implemented yet\n");
             return -1;
 
