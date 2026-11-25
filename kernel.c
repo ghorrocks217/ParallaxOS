@@ -9,6 +9,7 @@
 #include "fs/vfs.h"
 #include "drivers/ata.h"
 #include "storage/block_device.h"
+#include "fs/fat16.h"
 
 #define STACK_SIZE 8192
 
@@ -1837,6 +1838,91 @@ static void cmd_disktest(void) {
         kputs("Disk test failed: read-back data did not match.\n");
 }
 
+static void cmd_fatinfo(void) {
+    struct fat16_info info;
+
+    if (!fat16_get_info(&info)) {
+        kputs("No FAT16 filesystem mounted.\n");
+        return;
+    }
+
+    unsigned long long bytes =
+        (unsigned long long)info.total_sectors * 512ULL;
+
+    kputs("FAT16 filesystem:\n");
+
+    kprintf("  Device:              IDE %u\n", info.device);
+    kprintf("  Size:                %u MB\n",
+            (unsigned)(bytes / (1024ULL * 1024ULL)));
+    kprintf("  Total sectors:       %u\n", info.total_sectors);
+    kprintf("  Sectors per cluster: %u\n", info.sectors_per_cluster);
+    kprintf("  Reserved sectors:    %u\n", info.reserved_sectors);
+    kprintf("  FAT copies:          %u\n", info.fat_count);
+    kprintf("  Sectors per FAT:     %u\n", info.sectors_per_fat);
+    kprintf("  Root entries:        %u\n", info.root_entries);
+    kprintf("  Root directory size: %u sectors\n",
+            info.root_directory_sectors);
+    kprintf("  Data start:          LBA %u\n", info.data_start_sector);
+    kprintf("  Data clusters:       %u\n", info.cluster_count);
+}
+
+static void cmd_fatls(const char *argument) {
+    const char *path =
+        argument && *argument ? argument : "/";
+
+    struct vfs_dirent entries[16];
+
+    int count = fat16_list(path, entries, 16);
+
+    if (count < 0) {
+        kputs("Could not list FAT16 directory.\n");
+        return;
+    }
+
+    for (unsigned i = 0; i < (unsigned)count && i < 16; ++i) {
+        kprintf(
+            "%s %s",
+            entries[i].type == VFS_DIRECTORY
+                ? "[DIR] " : "[FILE]",
+            entries[i].name
+        );
+
+        if (entries[i].type == VFS_FILE)
+            kprintf(" (%u bytes)", entries[i].size);
+
+        kputc('\n');
+    }
+
+    if (count > 16)
+        kprintf("... and %u more entries\n", (unsigned)count - 16);
+}
+
+static void cmd_fatcat(const char *path) {
+    if (!path || !*path) {
+        kputs("usage: fatcat /FILE.TXT\n");
+        return;
+    }
+
+    /*
+     * Static buffer avoids putting a large file buffer on the
+     * shell's kernel stack. Files larger than this are rejected.
+     */
+    static char buffer[4096];
+
+    int size = fat16_read(path, buffer, sizeof(buffer));
+
+    if (size < 0) {
+        kputs("Could not read FAT16 file (maximum 4096 bytes).\n");
+        return;
+    }
+
+    for (int i = 0; i < size; ++i)
+        kputc(buffer[i]);
+
+    if (!size || buffer[size - 1] != '\n')
+        kputc('\n');
+}
+
 static void cmd_disks(void) {
     kputs("ATA devices:\n");
 
@@ -1903,7 +1989,10 @@ static void run_command(char *input) {
               "  write <file> <text>  write text to file\n"
               "  rm <path>       remove file or empty directory\n"
               "  disks           list detected ATA disks\n"
-              "  disktest        test disk sector read/write\n");
+              "  disktest        test disk sector read/write\n"
+              "  fatinfo         show mounted FAT16 filesystem information\n"
+              "  fatls [path]    list a FAT16 directory\n"
+              "  fatcat <path>   read a FAT16 file\n");
     } else if (streq(cmd, "clear")) {
         clear();
     } else if (streq(cmd, "echo")) {
@@ -1988,6 +2077,12 @@ static void run_command(char *input) {
         cmd_disks();
     } else if (streq(cmd, "disktest")) {
         cmd_disktest();
+    } else if (streq(cmd, "fatinfo")) {
+        cmd_fatinfo();
+    } else if (streq(cmd, "fatls")) {
+        cmd_fatls(args);
+    } else if (streq(cmd, "fatcat")) {
+        cmd_fatcat(args);
     } else {
         kprintf("unknown command: %s (try 'help')\n", cmd);
     }
@@ -1998,7 +2093,13 @@ void kmain(void) {
     serial_init();
     ata_init();
     clear();
-    kputs("MyOS booted. Type 'help' for commands.\n");
+
+    kputs("ParallaxOS booted. Type 'help' for commands.\n");
+
+    if (fat16_mount(1))
+        kputs("FAT16: mounted IDE device 1.\n");
+    else
+        kputs("FAT16: no valid FAT16 filesystem on IDE device 1.\n");
 
     gdt_init();                     /* own the GDT before anything else relies on segments */
     pic_remap();

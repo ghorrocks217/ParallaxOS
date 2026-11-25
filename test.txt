@@ -1,0 +1,2 @@
+Hello from the FAT16 filesystem!
+ParallaxOS can read this file.

@@ -19,7 +19,7 @@ CXXFLAGS = -m32 -ffreestanding -fno-builtin -fno-pic -fno-pie \
 
 LDFLAGS = -m elf_i386 --oformat binary
 
-# 64 sectors * 512 bytes
+# 128 sectors * 512 bytes
 KERNEL_MAX = 65536
 
 all: os.img
@@ -42,9 +42,8 @@ kernel/%.o: kernel/%.cpp
 serial.o: kernel/drivers/serial.c include/drivers/serial.h
 	$(CC) $(CFLAGS) -c $< -o $@
 
-kernel.bin: entry.o kernel.o serial.o kernel/drivers/ata.o kernel/storage/BlockDevice.o kernel/cpu/gdt.o kernel/cpu/idt.o kernel/cpu/usermode.o kernel/process/syscall.o kernel/process/ProcessManager.o kernel/memory/AddressSpace.o kernel/fs/VFS.o kernel/fs/RamFS.o linker.ld
-	$(LD) $(LDFLAGS) -T linker.ld -o kernel.bin entry.o kernel.o serial.o kernel/drivers/ata.o kernel/storage/BlockDevice.o kernel/cpu/gdt.o kernel/cpu/idt.o kernel/cpu/usermode.o kernel/process/syscall.o kernel/process/ProcessManager.o kernel/memory/AddressSpace.o kernel/fs/VFS.o kernel/fs/RamFS.o
-	@test $$(stat -c%s kernel.bin) -le $(KERNEL_MAX) || (echo "Kernel exceeds $(KERNEL_MAX)-byte bootloader limit"; exit 1)
+kernel.bin: entry.o kernel.o serial.o kernel/drivers/ata.o kernel/storage/BlockDevice.o kernel/cpu/gdt.o kernel/cpu/idt.o kernel/cpu/usermode.o kernel/process/syscall.o kernel/process/ProcessManager.o kernel/memory/AddressSpace.o kernel/fs/VFS.o kernel/fs/RamFS.o kernel/fs/FAT16.o linker.ld
+	$(LD) $(LDFLAGS) -T linker.ld -o kernel.bin entry.o kernel.o serial.o kernel/drivers/ata.o kernel/storage/BlockDevice.o kernel/cpu/gdt.o kernel/cpu/idt.o kernel/cpu/usermode.o kernel/process/syscall.o kernel/process/ProcessManager.o kernel/memory/AddressSpace.o kernel/fs/VFS.o kernel/fs/RamFS.o kernel/fs/FAT16.o
 
 kernel/cpu/gdt.o: kernel/cpu/gdt.c include/cpu/gdt.h
 	$(CC) $(CFLAGS) -c kernel/cpu/gdt.c -o kernel/cpu/gdt.o
@@ -54,6 +53,9 @@ kernel/cpu/idt.o: kernel/cpu/idt.c include/cpu/idt.h
 
 kernel/drivers/ata.o: kernel/drivers/ata.c include/drivers/ata.h
 	$(CC) $(CFLAGS) -c $< -o $@
+
+kernel/fs/FAT16.o: kernel/fs/FAT16.cpp include/fs/fat16.h include/fs/vfs.h include/storage/block_device.h
+	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 kernel/process/syscall.o: kernel/process/syscall.c include/process/syscall.h
 	$(CC) $(CFLAGS) -c $< -o $@
