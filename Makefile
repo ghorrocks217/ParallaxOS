@@ -42,8 +42,8 @@ kernel/%.o: kernel/%.cpp
 serial.o: kernel/drivers/serial.c include/drivers/serial.h
 	$(CC) $(CFLAGS) -c $< -o $@
 
-kernel.bin: entry.o kernel.o serial.o kernel/cpu/gdt.o kernel/cpu/idt.o kernel/process/syscall.o kernel/process/ProcessManager.o kernel/memory/AddressSpace.o linker.ld
-	$(LD) $(LDFLAGS) -T linker.ld -o kernel.bin entry.o kernel.o serial.o kernel/cpu/gdt.o kernel/cpu/idt.o kernel/process/syscall.o kernel/process/ProcessManager.o kernel/memory/AddressSpace.o
+kernel.bin: entry.o kernel.o serial.o kernel/cpu/gdt.o kernel/cpu/idt.o kernel/cpu/usermode.o kernel/process/syscall.o kernel/process/ProcessManager.o kernel/memory/AddressSpace.o linker.ld
+	$(LD) $(LDFLAGS) -T linker.ld -o kernel.bin entry.o kernel.o serial.o kernel/cpu/gdt.o kernel/cpu/idt.o kernel/cpu/usermode.o kernel/process/syscall.o kernel/process/ProcessManager.o kernel/memory/AddressSpace.o
 	@test $$(stat -c%s kernel.bin) -le $(KERNEL_MAX) || (echo "Kernel exceeds $(KERNEL_MAX)-byte bootloader limit"; exit 1)
 
 kernel/cpu/gdt.o: kernel/cpu/gdt.c include/cpu/gdt.h
