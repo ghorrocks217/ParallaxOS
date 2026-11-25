@@ -8,6 +8,13 @@ CFLAGS = -m32 -ffreestanding -fno-builtin -fno-pic -fno-pie \
          -fno-tree-loop-distribute-patterns -mgeneral-regs-only \
          -O2 -Wall -Iinclude
 
+
+CXX = g++
+
+CXXFLAGS = -m32 -ffreestanding -fno-builtin -fno-pic -fno-pie \
+         -fno-exceptions -fno-rtti -fno-use-cxa-atexit \
+         -fno-stack-protector -mgeneral-regs-only \
+         -O2 -Wall -Iinclude
 LDFLAGS = -m elf_i386 --oformat binary
 # 32 sectors * 512 bytes
 KERNEL_MAX = 16384
@@ -25,6 +32,9 @@ entry.o: entry.asm
 
 kernel.o: kernel.c
 	$(CC) $(CFLAGS) -c $< -o $@
+
+kernel/%.o: kernel/%.cpp
+	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 serial.o: kernel/drivers/serial.c include/drivers/serial.h
 	$(CC) $(CFLAGS) -c $< -o $@

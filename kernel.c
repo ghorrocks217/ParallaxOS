@@ -844,16 +844,62 @@ static void read_line(void) {
     }
 }
 
+static int copy_user_string(char *dst, unsigned src, unsigned capacity) {
+    if (!dst || !capacity)
+        return 0;
+
+    for (unsigned i = 0; i < capacity - 1; i++) {
+        unsigned addr = src + i;
+
+        // Detect address overflow.
+        if (addr < src)
+            return 0;
+
+        unsigned di = addr >> 22;
+        unsigned ti = (addr >> 12) & 0x3FF;
+
+        // The page directory entry must exist and be user-accessible.
+        if (!(page_dir[di] & PTE_P) || !(page_dir[di] & PTE_U))
+            return 0;
+
+        unsigned *pt = (unsigned *)(page_dir[di] & 0xFFFFF000);
+        unsigned pte = pt[ti];
+
+        // The page table entry must also be user-accessible.
+        if (!(pte & PTE_P) || !(pte & PTE_U))
+            return 0;
+
+        dst[i] = *(volatile const char *)addr;
+
+        if (dst[i] == '\0')
+            return 1;
+    }
+
+    dst[capacity - 1] = '\0';
+    return 1;
+}
+
 /* ---------- interrupt dispatch ---------- */
 void isr_handler(struct regs *r) {
     if (r->int_no == 128) {
         switch (r->eax) {
-            case 1:
-                kprintf("%s", (const char *)r->ebx);
+            case 1: {
+                char buffer[256];
+
+                if (!copy_user_string(buffer, r->ebx, sizeof(buffer))) {
+                    kprintf("[syscall] Invalid user string pointer\n");
+                    r->eax = (unsigned)-1;
+                    break;
+                }
+
+                kprintf("%s", buffer);
+                r->eax = 0;
                 break;
+            }
 
             default:
                 kprintf("Unknown syscall: %u\n", r->eax);
+                r->eax = (unsigned)-1;
                 break;
         }
 
