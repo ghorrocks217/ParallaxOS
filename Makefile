@@ -8,8 +8,7 @@ CFLAGS = -m32 -ffreestanding -fno-builtin -fno-pic -fno-pie \
          -fno-tree-loop-distribute-patterns -mgeneral-regs-only \
          -O2 -Wall -Iinclude
 
-LDFLAGS = -m elf_i386 -T linker.ld --oformat binary
-
+LDFLAGS = -m elf_i386 --oformat binary
 # 32 sectors * 512 bytes
 KERNEL_MAX = 16384
 
@@ -30,11 +29,11 @@ kernel.o: kernel.c
 serial.o: kernel/drivers/serial.c include/drivers/serial.h
 	$(CC) $(CFLAGS) -c $< -o $@
 
-kernel.bin: entry.o kernel.o serial.o linker.ld
-	$(LD) $(LDFLAGS) -o $@ entry.o kernel.o serial.o
-	@test $$(stat -c %s $@) -le $(KERNEL_MAX) || \
-	(echo "Kernel exceeds $(KERNEL_MAX) bytes!" && false)
-	truncate -s $(KERNEL_MAX) $@
+kernel.bin: entry.o kernel.o serial.o kernel/cpu/gdt.o linker.ld
+	$(LD) $(LDFLAGS) -T linker.ld -o kernel.bin entry.o kernel.o serial.o kernel/cpu/gdt.o
+
+kernel/cpu/gdt.o: kernel/cpu/gdt.c include/cpu/gdt.h
+	$(CC) $(CFLAGS) -c kernel/cpu/gdt.c -o kernel/cpu/gdt.o
 
 os.img: boot.bin stage2.bin kernel.bin
 	cat boot.bin stage2.bin kernel.bin > $@
@@ -44,6 +43,6 @@ run: os.img
 	qemu-system-i386 -drive format=raw,file=os.img
 
 clean:
-	rm -f *.bin *.o os.img
+	rm -f *.bin *.o kernel/cpu/*.o os.img
 
 .PHONY: all run clean

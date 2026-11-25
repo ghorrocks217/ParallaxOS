@@ -1,5 +1,6 @@
 #include <stdarg.h>
 #include "drivers/serial.h"
+#include "cpu/gdt.h"
 
 /* Build (32-bit freestanding): see the Makefile. Flags used:
  *   gcc -m32 -ffreestanding -fno-builtin -fno-pic -fno-pie -fno-stack-protector \
@@ -273,88 +274,11 @@ static void timer_init(void) {
     outb(0x40, (divisor >> 8) & 0xFF);
 }
 
-/* =====================================================================
- *  GDT + TSS: the kernel owns its segments now
- *    0x00 null | 0x08 kernel code | 0x10 kernel data
- *    0x18 user code (use 0x1B) | 0x20 user data (use 0x23) | 0x28 TSS
- *  The low 2 bits of a selector are the RPL, hence 0x1B = 0x18 | 3.
- * ===================================================================== */
-#define SEL_KCODE 0x08
-#define SEL_KDATA 0x10
-#define SEL_UCODE 0x1B
-#define SEL_UDATA 0x23
-#define SEL_TSS   0x28
-#define BOOT_STACK_TOP 0x90000u         /* the stack stage2 gave the shell task */
-
-struct gdt_entry {
-    unsigned short limit_lo;
-    unsigned short base_lo;
-    unsigned char  base_mid;
-    unsigned char  access;
-    unsigned char  gran;                /* high nibble: flags, low nibble: limit 19:16 */
-    unsigned char  base_hi;
-} __attribute__((packed));
-
-struct gdt_ptr {
-    unsigned short limit;
-    unsigned int   base;
-} __attribute__((packed));
-
-struct tss {
-    unsigned prev, esp0, ss0, esp1, ss1, esp2, ss2, cr3, eip, eflags;
-    unsigned eax, ecx, edx, ebx, esp, ebp, esi, edi;
-    unsigned es, cs, ss, ds, fs, gs, ldt;
-    unsigned short trap, iomap_base;
-} __attribute__((packed));              /* 104 bytes */
-
-static struct gdt_entry gdt[6];
-static struct gdt_ptr   gdtp;
-static struct tss       tss;
-
-static void gdt_set(int n, unsigned base, unsigned limit,
-                    unsigned char access, unsigned char gran) {
-    gdt[n].limit_lo = limit & 0xFFFF;
-    gdt[n].base_lo  = base & 0xFFFF;
-    gdt[n].base_mid = (base >> 16) & 0xFF;
-    gdt[n].access   = access;
-    gdt[n].gran     = ((limit >> 16) & 0x0F) | (gran & 0xF0);
-    gdt[n].base_hi  = (base >> 24) & 0xFF;
-}
 
 /* Where the CPU lands when a ring-3 task enters the kernel (interrupt/syscall).
  * schedule() updates this on every task switch. */
-static void tss_set_stack(unsigned top) { tss.esp0 = top; }
 
-static void gdt_init(void) {
-    memset(&tss, 0, sizeof(tss));
-    tss.ss0       = SEL_KDATA;
-    tss.esp0      = BOOT_STACK_TOP;
-    tss.iomap_base = sizeof(tss);       /* no I/O permission bitmap */
-
-    gdt_set(0, 0, 0, 0, 0);
-    gdt_set(1, 0, 0xFFFFF, 0x9A, 0xC0); /* kernel code: present, ring 0, exec/read  */
-    gdt_set(2, 0, 0xFFFFF, 0x92, 0xC0); /* kernel data: present, ring 0, read/write */
-    gdt_set(3, 0, 0xFFFFF, 0xFA, 0xC0); /* user code:   present, ring 3, exec/read  */
-    gdt_set(4, 0, 0xFFFFF, 0xF2, 0xC0); /* user data:   present, ring 3, read/write */
-    gdt_set(5, (unsigned)&tss, sizeof(tss) - 1, 0x89, 0x00); /* 32-bit TSS, byte granularity */
-
-    gdtp.limit = sizeof(gdt) - 1;
-    gdtp.base  = (unsigned)gdt;
-
-    __asm__ volatile(
-        "lgdt (%0)\n\t"
-        "mov $0x10, %%ax\n\t"           /* SEL_KDATA */
-        "mov %%ax, %%ds\n\t"
-        "mov %%ax, %%es\n\t"
-        "mov %%ax, %%fs\n\t"
-        "mov %%ax, %%gs\n\t"
-        "mov %%ax, %%ss\n\t"
-        "ljmp $0x08, $1f\n"             /* SEL_KCODE: reload CS */
-        "1:"
-        : : "r"(&gdtp) : "eax", "memory");
-
-    __asm__ volatile("ltr %%ax" : : "a"((unsigned short)SEL_TSS));
-}
+// static void tss_set_stack(unsigned top) { tss.esp0 = top; }
 
 /* =====================================================================
  *  PHYSICAL MEMORY MANAGER: one bit per 4 KB frame (1 = used, 0 = free)
@@ -610,6 +534,7 @@ void kfree(void *p) {
  * ===================================================================== */
 #define MAX_TASKS  16
 #define STACK_SIZE 8192
+#define BOOT_STACK_TOP 0x90000u
 
 enum { T_FREE = 0, T_READY, T_DEAD, T_SLEEPING, T_BLOCKED };
 
@@ -982,7 +907,7 @@ static void run_command(char *input) {
               "  hog             start a task that spins forever\n"
               "  kill <id>       stop a task\n"
               "  pagefault [null] deliberately trigger a page fault\n"
-              "  gdtinfo         show segment registers and the TSS\n"
+              "  gdtinfo         show segment registers and task register\n"
               "  reboot          restart the machine\n");
     } else if (streq(cmd, "clear")) {
         clear();
@@ -1029,13 +954,16 @@ static void run_command(char *input) {
         *p = 1;
     } else if (streq(cmd, "gdtinfo")) {
         unsigned short cs, ds, ss, tr;
+
         __asm__ volatile("mov %%cs, %0" : "=r"(cs));
         __asm__ volatile("mov %%ds, %0" : "=r"(ds));
         __asm__ volatile("mov %%ss, %0" : "=r"(ss));
         __asm__ volatile("str %0"       : "=r"(tr));
-        kprintf("CS=%x DS=%x SS=%x TR=%x\n", cs, ds, ss, tr);
-        kprintf("TSS: ss0=%x esp0=%x\n", tss.ss0, tss.esp0);
-        kprintf("GDT: %u entries at %x\n", (unsigned)(sizeof(gdt) / sizeof(gdt[0])), (unsigned)gdt);
+
+        kprintf("CS:  %x\n", (unsigned)cs);
+        kprintf("DS:  %x\n", (unsigned)ds);
+        kprintf("SS:  %x\n", (unsigned)ss);
+        kprintf("TR:  %x\n", (unsigned)tr);
     } else if (streq(cmd, "reboot")) {
         outb(0x64, 0xFE);
         for (;;) __asm__ volatile("hlt");
