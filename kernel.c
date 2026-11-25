@@ -1,6 +1,7 @@
 #include <stdarg.h>
 #include "drivers/serial.h"
 #include "cpu/gdt.h"
+#include "cpu/idt.h"
 
 /* Build (32-bit freestanding): see the Makefile. Flags used:
  *   gcc -m32 -ffreestanding -fno-builtin -fno-pic -fno-pie -fno-stack-protector \
@@ -181,42 +182,6 @@ static unsigned parse_uint(const char *s) {
     return v;
 }
 
-/* ---------- IDT ---------- */
-struct idt_entry {
-    unsigned short base_lo;
-    unsigned short sel;
-    unsigned char  zero;
-    unsigned char  flags;
-    unsigned short base_hi;
-} __attribute__((packed));
-
-struct idt_ptr {
-    unsigned short limit;
-    unsigned int   base;
-} __attribute__((packed));
-
-static struct idt_entry idt[256];
-static struct idt_ptr   idtp;
-
-extern unsigned int isr_table[48];
-extern void idt_flush(struct idt_ptr *);
-
-static void idt_set(int n, unsigned int handler) {
-    idt[n].base_lo = handler & 0xFFFF;
-    idt[n].sel     = 0x08;
-    idt[n].zero    = 0;
-    idt[n].flags   = 0x8E;
-    idt[n].base_hi = (handler >> 16) & 0xFFFF;
-}
-
-static void idt_init(void) {
-    for (int i = 0; i < 48; i++)
-        idt_set(i, isr_table[i]);
-    idtp.limit = sizeof(idt) - 1;
-    idtp.base  = (unsigned int)&idt;
-    idt_flush(&idtp);
-}
-
 /* Must match isr_common in entry.asm: pusha, then int_no/err_code, then CPU frame */
 struct regs {
     unsigned int edi, esi, ebp, esp, ebx, edx, ecx, eax;
@@ -395,6 +360,7 @@ void pmm_free(unsigned addr) {
  * ===================================================================== */
 #define PTE_P 0x1
 #define PTE_W 0x2
+#define PTE_U 0x4
 
 static unsigned *page_dir;
 static int paging_on = 0;
@@ -405,11 +371,24 @@ static void vmm_map(unsigned virt, unsigned phys, unsigned flags) {
 
     if (!(page_dir[di] & PTE_P)) {
         unsigned pt = pmm_alloc();
-        if (!pt) panic("out of memory for a page table");
+
+        if (!pt)
+            panic("out of memory for a page table");
+
         memset((void *)pt, 0, PAGE);
+
         page_dir[di] = pt | PTE_P | PTE_W;
     }
+
+    /*
+     * User access requires the U/S bit in BOTH
+     * the page directory and page table entries.
+     */
+    if (flags & PTE_U)
+        page_dir[di] |= PTE_U;
+
     unsigned *pt = (unsigned *)(page_dir[di] & 0xFFFFF000);
+
     pt[ti] = (phys & 0xFFFFF000) | flags | PTE_P;
 
     if (paging_on)
@@ -431,6 +410,79 @@ static void vmm_init(void) {
     cr0 |= 0x80000000;
     __asm__ volatile("mov %0, %%cr0" : : "r"(cr0));
     paging_on = 1;
+}
+
+#define USER_CODE  0x00400000
+#define USER_STACK 0xBFFFF000
+
+static void user_mode_test(void) __attribute__((noreturn));
+
+static void user_mode_test(void) {
+    unsigned code_page = pmm_alloc();
+    unsigned stack_page = pmm_alloc();
+
+    if (!code_page || !stack_page)
+        panic("could not allocate user pages");
+
+    /*
+     * Machine code:
+     *
+     * mov eax, 1
+     * mov ebx, 0x00400100
+     * int 0x80
+     * jmp $
+     *
+     * The string is stored at offset 0x100.
+     */
+    static const unsigned char user_program[] = {
+        0xB8, 0x01, 0x00, 0x00, 0x00,
+        0xBB, 0x00, 0x01, 0x40, 0x00,
+        0xCD, 0x80,
+        0xEB, 0xFE
+    };
+
+    static const char message[] = "Hello from Ring 3!\n";
+
+    memset((void *)code_page, 0, PAGE);
+    memset((void *)stack_page, 0, PAGE);
+
+    memcpy((void *)code_page, user_program, sizeof(user_program));
+    memcpy((void *)(code_page + 0x100), message, sizeof(message));
+
+    vmm_map(USER_CODE, code_page, PTE_W | PTE_U);
+    vmm_map(USER_STACK, stack_page, PTE_W | PTE_U);
+
+    kprintf("Entering Ring 3...\n");
+
+    __asm__ volatile(
+        "cli\n\t"
+
+        "mov $0x23, %%ax\n\t"
+        "mov %%ax, %%ds\n\t"
+        "mov %%ax, %%es\n\t"
+        "mov %%ax, %%fs\n\t"
+        "mov %%ax, %%gs\n\t"
+
+        "push $0x23\n\t"
+        "push %0\n\t"
+
+        "pushf\n\t"
+        "pop %%eax\n\t"
+        "or $0x200, %%eax\n\t"
+        "push %%eax\n\t"
+
+        "push $0x1B\n\t"
+        "push %1\n\t"
+
+        "iret\n\t"
+
+        :
+        : "r"(USER_STACK + PAGE),
+          "r"(USER_CODE)
+        : "eax", "memory"
+    );
+
+    __builtin_unreachable();
 }
 
 /* =====================================================================
@@ -794,6 +846,19 @@ static void read_line(void) {
 
 /* ---------- interrupt dispatch ---------- */
 void isr_handler(struct regs *r) {
+    if (r->int_no == 128) {
+        switch (r->eax) {
+            case 1:
+                kprintf("%s", (const char *)r->ebx);
+                break;
+
+            default:
+                kprintf("Unknown syscall: %u\n", r->eax);
+                break;
+        }
+
+        return;
+    }
     if (r->int_no >= 32) {
         if (r->int_no == 32) {
             ticks++;
@@ -908,7 +973,8 @@ static void run_command(char *input) {
               "  kill <id>       stop a task\n"
               "  pagefault [null] deliberately trigger a page fault\n"
               "  gdtinfo         show segment registers and task register\n"
-              "  reboot          restart the machine\n");
+              "  reboot          restart the machine\n"
+              "  usermode        run a Ring 3 test program\n");
     } else if (streq(cmd, "clear")) {
         clear();
     } else if (streq(cmd, "echo")) {
@@ -967,6 +1033,8 @@ static void run_command(char *input) {
     } else if (streq(cmd, "reboot")) {
         outb(0x64, 0xFE);
         for (;;) __asm__ volatile("hlt");
+    } else if (streq(cmd, "usermode")) {
+        user_mode_test();
     } else {
         kprintf("unknown command: %s (try 'help')\n", cmd);
     }

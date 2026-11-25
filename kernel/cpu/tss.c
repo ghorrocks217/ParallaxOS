@@ -1,1 +1,4 @@
-static void tss_set_stack(unsigned top) { tss.esp0 = top; }
+/*
+ * TSS implementation lives in gdt.c.
+ * This file is intentionally empty.
+ */

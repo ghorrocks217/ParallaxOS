@@ -29,11 +29,14 @@ kernel.o: kernel.c
 serial.o: kernel/drivers/serial.c include/drivers/serial.h
 	$(CC) $(CFLAGS) -c $< -o $@
 
-kernel.bin: entry.o kernel.o serial.o kernel/cpu/gdt.o linker.ld
-	$(LD) $(LDFLAGS) -T linker.ld -o kernel.bin entry.o kernel.o serial.o kernel/cpu/gdt.o
+kernel.bin: entry.o kernel.o serial.o kernel/cpu/gdt.o kernel/cpu/idt.o linker.ld
+	$(LD) $(LDFLAGS) -T linker.ld -o kernel.bin entry.o kernel.o serial.o kernel/cpu/gdt.o kernel/cpu/idt.o
 
 kernel/cpu/gdt.o: kernel/cpu/gdt.c include/cpu/gdt.h
 	$(CC) $(CFLAGS) -c kernel/cpu/gdt.c -o kernel/cpu/gdt.o
+
+kernel/cpu/idt.o: kernel/cpu/idt.c include/cpu/idt.h
+	$(CC) $(CFLAGS) -c kernel/cpu/idt.c -o $@
 
 os.img: boot.bin stage2.bin kernel.bin
 	cat boot.bin stage2.bin kernel.bin > $@

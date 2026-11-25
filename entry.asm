@@ -6,6 +6,7 @@
 global _start
 global idt_flush
 global isr_table
+global isr128
 global switch_context
 
 section .text
@@ -105,6 +106,7 @@ ISR_NOERR 44
 ISR_NOERR 45
 ISR_NOERR 46
 ISR_NOERR 47
+ISR_NOERR 128
 
 isr_common:
     pusha
