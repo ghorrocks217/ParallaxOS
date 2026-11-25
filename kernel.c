@@ -3,6 +3,7 @@
 #include "cpu/gdt.h"
 #include "cpu/idt.h"
 #include "process/syscall.h"
+#include "process/process.h"
 
 /* Build (32-bit freestanding): see the Makefile. Flags used:
  *   gcc -m32 -ffreestanding -fno-builtin -fno-pic -fno-pie -fno-stack-protector \
@@ -452,6 +453,20 @@ static void user_mode_test(void) {
 
     vmm_map(USER_CODE, code_page, PTE_W | PTE_U);
     vmm_map(USER_STACK, stack_page, PTE_W | PTE_U);
+
+    int pid = process_create(
+        "ring3-demo",
+        USER_CODE,
+        USER_STACK + PAGE,
+        (unsigned)page_dir
+    );
+
+    if (pid < 0)
+        panic("process table is full");
+
+    process_set_state((unsigned)pid, PROCESS_RUNNING);
+
+    kprintf("Starting process %u in Ring 3...\n", (unsigned)pid);
 
     kprintf("Entering Ring 3...\n");
 
@@ -979,6 +994,33 @@ static void cmd_ps(void) {
     }
 }
 
+static void cmd_procs(void) {
+    static const char *states[] = {
+        "free", "created", "ready", "running", "blocked", "exited"
+    };
+
+    struct process_info info;
+
+    kputs("PID  STATE    ENTRY      USER STACK  NAME\n");
+
+    for (unsigned i = 0; i < 16; ++i) {
+        if (!process_get_info(i, &info))
+            continue;
+
+        kprintf("%u    %s  %x  %x  %s",
+                info.pid,
+                states[info.state],
+                info.entry,
+                info.user_stack,
+                info.name);
+
+        if (info.state == PROCESS_EXITED)
+            kprintf(" (exit %d)", info.exit_code);
+
+        kputc('\n');
+    }
+}
+
 static void run_command(char *input) {
     while (*input == ' ') input++;
     if (!*input) return;
@@ -1005,7 +1047,8 @@ static void run_command(char *input) {
               "  pagefault [null] deliberately trigger a page fault\n"
               "  gdtinfo         show segment registers and task register\n"
               "  reboot          restart the machine\n"
-              "  usermode        run a Ring 3 test program\n");
+              "  usermode        run a Ring 3 test program\n"
+              "  procs           list user processes\n");
     } else if (streq(cmd, "clear")) {
         clear();
     } else if (streq(cmd, "echo")) {
@@ -1066,6 +1109,8 @@ static void run_command(char *input) {
         for (;;) __asm__ volatile("hlt");
     } else if (streq(cmd, "usermode")) {
         user_mode_test();
+    } else if (streq(cmd, "procs")) {
+        cmd_procs();
     } else {
         kprintf("unknown command: %s (try 'help')\n", cmd);
     }
@@ -1083,6 +1128,7 @@ void kmain(void) {
     pmm_init();
     vmm_init();
     timer_init();
+    process_manager_init();
 
     /* The code we're running right now becomes task 0 */
     tasks[0].state = T_READY;
