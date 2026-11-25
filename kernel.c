@@ -4,6 +4,7 @@
 #include "cpu/idt.h"
 #include "process/syscall.h"
 #include "process/process.h"
+#include "memory/address_space.h"
 
 /* Build (32-bit freestanding): see the Makefile. Flags used:
  *   gcc -m32 -ffreestanding -fno-builtin -fno-pic -fno-pie -fno-stack-protector \
@@ -1235,6 +1236,91 @@ static void cmd_memmap(void) {
     }
 }
 
+#define VMTEST_ADDRESS 0x00800000
+
+static void cmd_vmtest(void) {
+    address_space first = {0};
+    address_space second = {0};
+    address_space kernel = {0};
+
+    unsigned frame_a = 0;
+    unsigned frame_b = 0;
+    unsigned irq = irq_save();
+
+    int success = 0;
+
+    kernel.directory = address_space_kernel_directory();
+
+    /* Allocate two separate physical pages. */
+    frame_a = pmm_alloc();
+    frame_b = pmm_alloc();
+
+    if (!frame_a || !frame_b)
+        goto cleanup;
+
+    memset((void *)frame_a, 0, PAGE);
+    memset((void *)frame_b, 0, PAGE);
+
+    /* Create two independent page directories. */
+    if (!address_space_create(&first))
+        goto cleanup;
+
+    if (!address_space_create(&second))
+        goto cleanup;
+
+    /* Map the SAME virtual address to DIFFERENT physical pages. */
+    if (!address_space_map_user(
+            &first, VMTEST_ADDRESS, frame_a, PTE_W))
+        goto cleanup;
+
+    if (!address_space_map_user(
+            &second, VMTEST_ADDRESS, frame_b, PTE_W))
+        goto cleanup;
+
+    volatile unsigned *probe =
+        (volatile unsigned *)VMTEST_ADDRESS;
+
+    /* Write through the first address space. */
+    address_space_activate(&first);
+    *probe = 0x11111111;
+
+    /* Write through the second address space. */
+    address_space_activate(&second);
+    *probe = 0x22222222;
+
+    /* Verify that the first value was not overwritten. */
+    address_space_activate(&first);
+
+    if (*probe != 0x11111111)
+        goto cleanup;
+
+    /* Verify the second value independently. */
+    address_space_activate(&second);
+
+    if (*probe != 0x22222222)
+        goto cleanup;
+
+    success = 1;
+
+cleanup:
+    /* Never leave the kernel running on a test page directory. */
+    address_space_activate(&kernel);
+
+    address_space_destroy(&first);
+    address_space_destroy(&second);
+
+    /* Destroying an address space does not free mapped data frames. */
+    if (frame_a) pmm_free(frame_a);
+    if (frame_b) pmm_free(frame_b);
+
+    irq_restore(irq);
+
+    if (success)
+        kputs("VM test passed: address spaces are isolated.\n");
+    else
+        kputs("VM test FAILED.\n");
+}
+
 static void cmd_memtest(void) {
     void *a = kmalloc(100);
     void *b = kmalloc(5000);
@@ -1318,7 +1404,8 @@ static void run_command(char *input) {
               "  gdtinfo         show segment registers and task register\n"
               "  reboot          restart the machine\n"
               "  usermode        run a Ring 3 test program\n"
-              "  procs           list user processes\n");
+              "  procs           list user processes\n"
+              "  vmtest          test virtual address-space isolation\n");
     } else if (streq(cmd, "clear")) {
         clear();
     } else if (streq(cmd, "echo")) {
@@ -1381,6 +1468,8 @@ static void run_command(char *input) {
         user_mode_test();
     } else if (streq(cmd, "procs")) {
         cmd_procs();
+    } else if (streq(cmd, "vmtest")) {
+        cmd_vmtest();
     } else {
         kprintf("unknown command: %s (try 'help')\n", cmd);
     }

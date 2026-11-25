@@ -1,9 +1,9 @@
 #ifndef MEMORY_ADDRESS_SPACE_H
 #define MEMORY_ADDRESS_SPACE_H
 
-struct address_space {
+typedef struct address_space {
     unsigned directory;
-};
+} address_space;
 
 #ifdef __cplusplus
 extern "C" {
