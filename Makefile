@@ -69,6 +69,6 @@ run: os.img
 	qemu-system-i386 -drive format=raw,file=os.img
 
 clean:
-	rm -f *.bin *.o kernel/cpu/*.o kernel/memory/*.o kernel/process/*.o os.img
+	rm -f *.bin *.o kernel/cpu/*.o kernel/process/*.o kernel/memory/*.o os.img
 
 .PHONY: all run clean

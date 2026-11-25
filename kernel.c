@@ -414,6 +414,276 @@ static void vmm_init(void) {
     paging_on = 1;
 }
 
+/* =====================================================================
+ *  ADDRESS SPACE MANAGEMENT
+ * ===================================================================== */
+
+/*
+ * Every process receives its own page directory.
+ * Kernel page tables are initially shared.
+ * A page table is copied when a process needs a private user mapping.
+ */
+
+unsigned paging_kernel_directory(void) {
+    return (unsigned)page_dir;
+}
+
+/* Switch the active page directory by loading CR3. */
+void paging_switch_directory(unsigned directory) {
+    if (!directory)
+        return;
+
+    unsigned current_cr3;
+
+    __asm__ volatile(
+        "mov %%cr3, %0"
+        : "=r"(current_cr3)
+    );
+
+    if ((current_cr3 & 0xFFFFF000) == (directory & 0xFFFFF000))
+        return;
+
+    __asm__ volatile(
+        "mov %0, %%cr3"
+        :
+        : "r"(directory)
+        : "memory"
+    );
+}
+
+/* Create a page directory containing the kernel's existing mappings. */
+int paging_create_directory(unsigned *directory) {
+    if (!directory || !page_dir)
+        return 0;
+
+    unsigned frame = pmm_alloc();
+
+    if (!frame)
+        return 0;
+
+    unsigned *new_directory = (unsigned *)frame;
+
+    memset(new_directory, 0, PAGE);
+    memcpy(new_directory, page_dir, PAGE);
+
+    *directory = frame;
+
+    return 1;
+}
+
+/*
+ * Destroy an address space.
+ *
+ * Page tables identical to the kernel's are shared and must not be freed.
+ * Private page tables belong to this address space and are freed.
+ */
+void paging_destroy_directory(unsigned directory) {
+    if (!directory)
+        return;
+
+    unsigned *target = (unsigned *)directory;
+
+    if (target == page_dir)
+        return;
+
+    unsigned current_cr3;
+
+    __asm__ volatile(
+        "mov %%cr3, %0"
+        : "=r"(current_cr3)
+    );
+
+    if ((current_cr3 & 0xFFFFF000) == directory)
+        paging_switch_directory((unsigned)page_dir);
+
+    for (unsigned i = 0; i < 1024; i++) {
+        unsigned entry = target[i];
+
+        if (!(entry & PTE_P))
+            continue;
+
+        /* Shared kernel page table: leave it alone. */
+        if (entry == page_dir[i])
+            continue;
+
+        unsigned table = entry & 0xFFFFF000;
+
+        pmm_free(table);
+    }
+
+    pmm_free(directory);
+}
+
+/*
+ * Map a user page.
+ *
+ * If the page table is shared with the kernel, make a private copy first.
+ * Existing supervisor mappings can be replaced, but existing user mappings
+ * cannot be silently overwritten.
+ */
+int paging_map_user(
+    unsigned directory,
+    unsigned virtual_address,
+    unsigned physical_address,
+    unsigned flags
+) {
+    if (!directory || !physical_address)
+        return 0;
+
+    if ((virtual_address & 0xFFF) ||
+        (physical_address & 0xFFF))
+        return 0;
+
+    unsigned *dir = (unsigned *)directory;
+
+    if (dir == page_dir)
+        return 0;
+
+    unsigned di = virtual_address >> 22;
+    unsigned ti = (virtual_address >> 12) & 0x3FF;
+
+    unsigned *table;
+
+    if (!(dir[di] & PTE_P)) {
+        /* No existing page table. Create a private one. */
+        unsigned frame = pmm_alloc();
+
+        if (!frame)
+            return 0;
+
+        table = (unsigned *)frame;
+        memset(table, 0, PAGE);
+
+        dir[di] = frame | PTE_P | PTE_W | PTE_U;
+    }
+    else if (dir[di] == page_dir[di]) {
+        /* The page table is shared with the kernel. Clone it. */
+        unsigned frame = pmm_alloc();
+
+        if (!frame)
+            return 0;
+
+        table = (unsigned *)frame;
+
+        unsigned *kernel_table =
+            (unsigned *)(page_dir[di] & 0xFFFFF000);
+
+        memcpy(table, kernel_table, PAGE);
+
+        dir[di] = frame | PTE_P | PTE_W | PTE_U;
+    }
+    else {
+        /* Already private to this address space. */
+        table = (unsigned *)(dir[di] & 0xFFFFF000);
+
+        dir[di] |= PTE_U;
+    }
+
+    /* Never overwrite an existing user mapping. */
+    if (table[ti] & PTE_U)
+        return 0;
+
+    table[ti] =
+        (physical_address & 0xFFFFF000) |
+        PTE_P |
+        PTE_U |
+        (flags & PTE_W);
+
+    /* Flush this address if the target directory is currently active. */
+    unsigned current_cr3;
+
+    __asm__ volatile(
+        "mov %%cr3, %0"
+        : "=r"(current_cr3)
+    );
+
+    if ((current_cr3 & 0xFFFFF000) == directory) {
+        __asm__ volatile(
+            "invlpg (%0)"
+            :
+            : "r"(virtual_address)
+            : "memory"
+        );
+    }
+
+    return 1;
+}
+
+/* Remove a user mapping without freeing its physical frame. */
+int paging_unmap_user(
+    unsigned directory,
+    unsigned virtual_address
+) {
+    if (!directory || (virtual_address & 0xFFF))
+        return 0;
+
+    unsigned *dir = (unsigned *)directory;
+
+    unsigned di = virtual_address >> 22;
+    unsigned ti = (virtual_address >> 12) & 0x3FF;
+
+    if (!(dir[di] & PTE_P) || !(dir[di] & PTE_U))
+        return 0;
+
+    /* Never modify a shared kernel page table. */
+    if (dir[di] == page_dir[di])
+        return 0;
+
+    unsigned *table =
+        (unsigned *)(dir[di] & 0xFFFFF000);
+
+    if (!(table[ti] & PTE_U))
+        return 0;
+
+    table[ti] = 0;
+
+    unsigned current_cr3;
+
+    __asm__ volatile(
+        "mov %%cr3, %0"
+        : "=r"(current_cr3)
+    );
+
+    if ((current_cr3 & 0xFFFFF000) == directory) {
+        __asm__ volatile(
+            "invlpg (%0)"
+            :
+            : "r"(virtual_address)
+            : "memory"
+        );
+    }
+
+    return 1;
+}
+
+/* Translate a user virtual address into its physical address. */
+unsigned paging_translate_user(
+    unsigned directory,
+    unsigned virtual_address
+) {
+    if (!directory)
+        return 0;
+
+    unsigned *dir = (unsigned *)directory;
+
+    unsigned di = virtual_address >> 22;
+    unsigned ti = (virtual_address >> 12) & 0x3FF;
+
+    if (!(dir[di] & PTE_P) || !(dir[di] & PTE_U))
+        return 0;
+
+    unsigned *table =
+        (unsigned *)(dir[di] & 0xFFFFF000);
+
+    unsigned entry = table[ti];
+
+    if (!(entry & PTE_P) || !(entry & PTE_U))
+        return 0;
+
+    return (entry & 0xFFFFF000) |
+           (virtual_address & 0xFFF);
+}
+
 #define USER_CODE  0x00400000
 #define USER_STACK 0xBFFFF000
 

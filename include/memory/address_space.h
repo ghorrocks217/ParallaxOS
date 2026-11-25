@@ -5,7 +5,10 @@ struct address_space {
     unsigned directory;
 };
 
-/* Address-space management */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 int address_space_create(address_space *space);
 void address_space_destroy(address_space *space);
 
@@ -28,5 +31,9 @@ unsigned address_space_translate_user(
 
 void address_space_activate(address_space *space);
 unsigned address_space_kernel_directory(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif
