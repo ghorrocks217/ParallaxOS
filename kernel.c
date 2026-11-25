@@ -8,6 +8,7 @@
 #include "cpu/usermode.h"
 #include "fs/vfs.h"
 #include "drivers/ata.h"
+#include "storage/block_device.h"
 
 #define STACK_SIZE 8192
 
@@ -1780,6 +1781,62 @@ static void cmd_rm(const char *argument) {
         kputs("removed\n");
 }
 
+static void cmd_disktest(void) {
+    block_device disk;
+
+    /* QEMU data.img is the primary IDE slave: device index 1. */
+    if (!block_device_get(1, &disk)) {
+        kputs("Data disk not found.\n");
+        return;
+    }
+
+    if (disk.sector_count <= 1) {
+        kputs("Data disk is too small.\n");
+        return;
+    }
+
+    unsigned char original[ATA_SECTOR_SIZE];
+    unsigned char pattern[ATA_SECTOR_SIZE];
+    unsigned char result[ATA_SECTOR_SIZE];
+
+    if (!disk.read(disk.id, 1, 1, original)) {
+        kputs("Could not read test sector.\n");
+        return;
+    }
+
+    for (unsigned i = 0; i < ATA_SECTOR_SIZE; ++i)
+        pattern[i] = (unsigned char)((i * 37 + 123) & 0xFF);
+
+    if (!disk.write(disk.id, 1, 1, pattern)) {
+        kputs("Test write failed.\n");
+        return;
+    }
+
+    int read_ok = disk.read(disk.id, 1, 1, result);
+    int matches = read_ok;
+
+    if (matches) {
+        for (unsigned i = 0; i < ATA_SECTOR_SIZE; ++i) {
+            if (result[i] != pattern[i]) {
+                matches = 0;
+                break;
+            }
+        }
+    }
+
+    int restored = disk.write(disk.id, 1, 1, original);
+
+    if (!restored) {
+        kputs("WARNING: Could not restore original sector!\n");
+        return;
+    }
+
+    if (matches)
+        kputs("Disk test passed: sector write/read/compare/restore succeeded.\n");
+    else
+        kputs("Disk test failed: read-back data did not match.\n");
+}
+
 static void cmd_disks(void) {
     kputs("ATA devices:\n");
 
@@ -1845,7 +1902,8 @@ static void run_command(char *input) {
               "  cat <file>      display file contents\n"
               "  write <file> <text>  write text to file\n"
               "  rm <path>       remove file or empty directory\n"
-              "  disks           list detected ATA disks\n");
+              "  disks           list detected ATA disks\n"
+              "  disktest        test disk sector read/write\n");
     } else if (streq(cmd, "clear")) {
         clear();
     } else if (streq(cmd, "echo")) {
@@ -1928,6 +1986,8 @@ static void run_command(char *input) {
         cmd_rm(args);
     } else if (streq(cmd, "disks")) {
         cmd_disks();
+    } else if (streq(cmd, "disktest")) {
+        cmd_disktest();
     } else {
         kprintf("unknown command: %s (try 'help')\n", cmd);
     }

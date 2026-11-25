@@ -42,8 +42,8 @@ kernel/%.o: kernel/%.cpp
 serial.o: kernel/drivers/serial.c include/drivers/serial.h
 	$(CC) $(CFLAGS) -c $< -o $@
 
-kernel.bin: entry.o kernel.o serial.o kernel/drivers/ata.o kernel/cpu/gdt.o kernel/cpu/idt.o kernel/cpu/usermode.o kernel/process/syscall.o kernel/process/ProcessManager.o kernel/memory/AddressSpace.o kernel/fs/VFS.o kernel/fs/RamFS.o linker.ld
-	$(LD) $(LDFLAGS) -T linker.ld -o kernel.bin entry.o kernel.o serial.o kernel/drivers/ata.o kernel/cpu/gdt.o kernel/cpu/idt.o kernel/cpu/usermode.o kernel/process/syscall.o kernel/process/ProcessManager.o kernel/memory/AddressSpace.o kernel/fs/VFS.o kernel/fs/RamFS.o
+kernel.bin: entry.o kernel.o serial.o kernel/drivers/ata.o kernel/storage/BlockDevice.o kernel/cpu/gdt.o kernel/cpu/idt.o kernel/cpu/usermode.o kernel/process/syscall.o kernel/process/ProcessManager.o kernel/memory/AddressSpace.o kernel/fs/VFS.o kernel/fs/RamFS.o linker.ld
+	$(LD) $(LDFLAGS) -T linker.ld -o kernel.bin entry.o kernel.o serial.o kernel/drivers/ata.o kernel/storage/BlockDevice.o kernel/cpu/gdt.o kernel/cpu/idt.o kernel/cpu/usermode.o kernel/process/syscall.o kernel/process/ProcessManager.o kernel/memory/AddressSpace.o kernel/fs/VFS.o kernel/fs/RamFS.o
 	@test $$(stat -c%s kernel.bin) -le $(KERNEL_MAX) || (echo "Kernel exceeds $(KERNEL_MAX)-byte bootloader limit"; exit 1)
 
 kernel/cpu/gdt.o: kernel/cpu/gdt.c include/cpu/gdt.h
@@ -67,6 +67,9 @@ kernel/memory/AddressSpace.o: kernel/memory/AddressSpace.cpp include/memory/addr
 kernel/cpu/usermode.o: kernel/cpu/usermode.asm
 	nasm -f elf32 $< -o $@
 
+kernel/storage/BlockDevice.o: kernel/storage/BlockDevice.cpp include/storage/block_device.h include/drivers/ata.h
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
 kernel/fs/VFS.o: kernel/fs/VFS.cpp include/fs/vfs.h include/fs/ramfs.h
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
@@ -86,6 +89,6 @@ run: os.img data.img
 		-drive file=data.img,format=raw,if=ide,index=1
 
 clean:
-	rm -f *.bin *.o kernel/cpu/*.o kernel/process/*.o kernel/memory/*.o kernel/fs/*.o kernel/drivers/*.o os.img
+	rm -f *.bin *.o kernel/cpu/*.o kernel/process/*.o kernel/memory/*.o kernel/fs/*.o kernel/drivers/*.o kernel/storage/*.o os.img
 
 .PHONY: all run clean
