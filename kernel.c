@@ -7,6 +7,7 @@
 #include "memory/address_space.h"
 #include "cpu/usermode.h"
 #include "fs/vfs.h"
+#include "drivers/ata.h"
 
 #define STACK_SIZE 8192
 
@@ -1779,6 +1780,34 @@ static void cmd_rm(const char *argument) {
         kputs("removed\n");
 }
 
+static void cmd_disks(void) {
+    kputs("ATA devices:\n");
+
+    unsigned count = 0;
+
+    for (unsigned i = 0; i < ATA_DEVICE_COUNT; ++i) {
+        ata_device_info dev;
+
+        if (!ata_get_device(i, &dev))
+            continue;
+
+        unsigned long long size =
+            (unsigned long long)dev.sectors * 512ULL;
+
+        kprintf("  IDE %u: %s\n", i, dev.model);
+        kprintf("    Sectors: %u\n", dev.sectors);
+        kprintf("    Size: %u MB\n",
+                (unsigned)(size / (1024ULL * 1024ULL)));
+
+        ++count;
+    }
+
+    if (!count)
+        kputs("  No ATA disks detected.\n");
+
+    kprintf("Total devices: %u\n", count);
+}
+
 static void run_command(char *input) {
     while (*input == ' ') input++;
     if (!*input) return;
@@ -1815,7 +1844,8 @@ static void run_command(char *input) {
               "  touch <file>    create empty file\n"
               "  cat <file>      display file contents\n"
               "  write <file> <text>  write text to file\n"
-              "  rm <path>       remove file or empty directory\n");
+              "  rm <path>       remove file or empty directory\n"
+              "  disks           list detected ATA disks\n");
     } else if (streq(cmd, "clear")) {
         clear();
     } else if (streq(cmd, "echo")) {
@@ -1896,6 +1926,8 @@ static void run_command(char *input) {
         cmd_write(args);
     } else if (streq(cmd, "rm")) {
         cmd_rm(args);
+    } else if (streq(cmd, "disks")) {
+        cmd_disks();
     } else {
         kprintf("unknown command: %s (try 'help')\n", cmd);
     }
@@ -1904,6 +1936,7 @@ static void run_command(char *input) {
 /* ---------- kernel main (becomes task 0: the shell) ---------- */
 void kmain(void) {
     serial_init();
+    ata_init();
     clear();
     kputs("MyOS booted. Type 'help' for commands.\n");
 

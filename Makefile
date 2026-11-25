@@ -20,7 +20,7 @@ CXXFLAGS = -m32 -ffreestanding -fno-builtin -fno-pic -fno-pie \
 LDFLAGS = -m elf_i386 --oformat binary
 
 # 64 sectors * 512 bytes
-KERNEL_MAX = 32768
+KERNEL_MAX = 65536
 
 all: os.img
 
@@ -42,8 +42,8 @@ kernel/%.o: kernel/%.cpp
 serial.o: kernel/drivers/serial.c include/drivers/serial.h
 	$(CC) $(CFLAGS) -c $< -o $@
 
-kernel.bin: entry.o kernel.o serial.o kernel/cpu/gdt.o kernel/cpu/idt.o kernel/cpu/usermode.o kernel/process/syscall.o kernel/process/ProcessManager.o kernel/memory/AddressSpace.o kernel/fs/VFS.o kernel/fs/RamFS.o linker.ld
-	$(LD) $(LDFLAGS) -T linker.ld -o kernel.bin entry.o kernel.o serial.o kernel/cpu/gdt.o kernel/cpu/idt.o kernel/cpu/usermode.o kernel/process/syscall.o kernel/process/ProcessManager.o kernel/memory/AddressSpace.o kernel/fs/VFS.o kernel/fs/RamFS.o
+kernel.bin: entry.o kernel.o serial.o kernel/drivers/ata.o kernel/cpu/gdt.o kernel/cpu/idt.o kernel/cpu/usermode.o kernel/process/syscall.o kernel/process/ProcessManager.o kernel/memory/AddressSpace.o kernel/fs/VFS.o kernel/fs/RamFS.o linker.ld
+	$(LD) $(LDFLAGS) -T linker.ld -o kernel.bin entry.o kernel.o serial.o kernel/drivers/ata.o kernel/cpu/gdt.o kernel/cpu/idt.o kernel/cpu/usermode.o kernel/process/syscall.o kernel/process/ProcessManager.o kernel/memory/AddressSpace.o kernel/fs/VFS.o kernel/fs/RamFS.o
 	@test $$(stat -c%s kernel.bin) -le $(KERNEL_MAX) || (echo "Kernel exceeds $(KERNEL_MAX)-byte bootloader limit"; exit 1)
 
 kernel/cpu/gdt.o: kernel/cpu/gdt.c include/cpu/gdt.h
@@ -51,6 +51,9 @@ kernel/cpu/gdt.o: kernel/cpu/gdt.c include/cpu/gdt.h
 
 kernel/cpu/idt.o: kernel/cpu/idt.c include/cpu/idt.h
 	$(CC) $(CFLAGS) -c kernel/cpu/idt.c -o $@
+
+kernel/drivers/ata.o: kernel/drivers/ata.c include/drivers/ata.h
+	$(CC) $(CFLAGS) -c $< -o $@
 
 kernel/process/syscall.o: kernel/process/syscall.c include/process/syscall.h
 	$(CC) $(CFLAGS) -c $< -o $@
@@ -74,9 +77,15 @@ os.img: boot.bin stage2.bin kernel.bin
 	cat boot.bin stage2.bin kernel.bin > $@
 	truncate -s 1M $@
 
-run: os.img
-	qemu-system-i386 -drive format=raw,file=os.img
+data.img:
+	truncate -s 16M data.img
+
+run: os.img data.img
+	qemu-system-i386 \
+		-drive file=os.img,format=raw,if=ide,index=0 \
+		-drive file=data.img,format=raw,if=ide,index=1
 
 clean:
-	rm -f *.bin *.o kernel/cpu/*.o kernel/process/*.o kernel/memory/*.o kernel/fs/*.o os.img
+	rm -f *.bin *.o kernel/cpu/*.o kernel/process/*.o kernel/memory/*.o kernel/fs/*.o kernel/drivers/*.o os.img
+
 .PHONY: all run clean
