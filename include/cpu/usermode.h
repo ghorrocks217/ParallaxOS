@@ -5,6 +5,8 @@ void enter_user_mode(
     unsigned entry,
     unsigned user_stack,
     unsigned kernel_stack_top
-) __attribute__((noreturn));
+);
+
+void leave_user_mode(void) __attribute__((noreturn));
 
 #endif

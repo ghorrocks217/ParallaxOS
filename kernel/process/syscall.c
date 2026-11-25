@@ -33,8 +33,7 @@ int syscall_handler(
             return -1;
 
         case SYS_EXIT:
-            kprintf("[syscall] SYS_EXIT is not implemented yet\n");
-            return -1;
+            return SYSCALL_TERMINATE;
 
         default:
             kprintf("[syscall] Unknown syscall: %u\n", number);

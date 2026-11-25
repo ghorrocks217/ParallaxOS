@@ -10,6 +10,7 @@
 #define STACK_SIZE 8192
 
 extern void *kmalloc(unsigned n);
+extern void kfree(void *p);
 
 /* Build (32-bit freestanding): see the Makefile. Flags used:
  *   gcc -m32 -ffreestanding -fno-builtin -fno-pic -fno-pie -fno-stack-protector \
@@ -704,8 +705,14 @@ unsigned paging_translate_user(
 #define USER_CODE  0x00400000
 #define USER_STACK 0xBFFFF000
 
+unsigned user_mode_saved_esp = 0;
+unsigned user_mode_saved_eflags = 0;
 
-static void user_mode_test(void) __attribute__((noreturn));
+static unsigned active_user_pid = 0;
+
+extern void paging_switch_directory(unsigned directory);
+
+static void user_mode_test(void);
 
 static void user_mode_test(void) {
     unsigned code_page = pmm_alloc();
@@ -720,12 +727,17 @@ static void user_mode_test(void) {
         panic("could not create process address space");
 
     static const unsigned char user_program[] = {
-        /* SYS_WRITE(0x00400100) */
+        /* SYS_WRITE(message) */
         0xB8, 0x01, 0x00, 0x00, 0x00,
         0xBB, 0x00, 0x01, 0x40, 0x00,
         0xCD, 0x80,
 
-        /* Infinite loop. No unsafe SYS_YIELD yet. */
+        /* SYS_EXIT(42) */
+        0xB8, 0x00, 0x00, 0x00, 0x00,
+        0xBB, 0x2A, 0x00, 0x00, 0x00,
+        0xCD, 0x80,
+
+        /* Should never reach this */
         0xEB, 0xFE
     };
 
@@ -757,6 +769,8 @@ static void user_mode_test(void) {
     if (pid < 0)
         panic("process table is full");
 
+    active_user_pid = (unsigned)pid;
+
     process_set_state((unsigned)pid, PROCESS_RUNNING);
 
     kprintf("Created process %u\n", (unsigned)pid);
@@ -766,8 +780,6 @@ static void user_mode_test(void) {
 
     address_space_activate(&space);
 
-    kprintf("Entering isolated Ring 3...\n");
-
     void *kernel_stack = kmalloc(STACK_SIZE);
 
     if (!kernel_stack)
@@ -776,13 +788,9 @@ static void user_mode_test(void) {
     unsigned kernel_stack_top =
         (unsigned)kernel_stack + STACK_SIZE;
 
-    /* The CPU uses this stack when Ring 3 enters the kernel. */
     tss_set_stack(kernel_stack_top);
 
-    /*
-     * Temporarily mask the PIT IRQ.
-     * The existing scheduler cannot safely switch Ring 3 contexts yet.
-     */
+    /* Disable timer preemption while the isolated user program runs. */
     outb(0x21, inb(0x21) | 0x01);
 
     kprintf("Entering isolated Ring 3...\n");
@@ -792,6 +800,20 @@ static void user_mode_test(void) {
         USER_STACK + PAGE,
         kernel_stack_top
     );
+
+    kprintf("Process %u exited.\n", active_user_pid);
+
+    address_space_destroy(&space);
+
+    pmm_free(code_page);
+    pmm_free(stack_page);
+
+    kfree(kernel_stack);
+
+    active_user_pid = 0;
+
+    /* Re-enable the timer interrupt. */
+    outb(0x21, inb(0x21) & ~0x01);
 }
 
 /* =====================================================================
@@ -894,7 +916,6 @@ void kfree(void *p) {
  *  TASKS: preemptive round-robin scheduler with sleeping / blocking
  * ===================================================================== */
 #define MAX_TASKS  16
-#define STACK_SIZE 8192
 #define BOOT_STACK_TOP 0x90000u
 
 enum { T_FREE = 0, T_READY, T_DEAD, T_SLEEPING, T_BLOCKED };
@@ -1066,7 +1087,9 @@ static void worker(void *arg) {
 static void hog(void *arg) {
     (void)arg;
     volatile unsigned n = 0;
-    for (;;) n++;                   /* never yields, but gets preempted anyway */
+    while (1) {
+        __asm__ volatile("" ::: "memory");
+    }                 /* never yields, but gets preempted anyway */
 }
 
 /* ---------- Keyboard: scancode decoder + type-ahead ring buffer ---------- */
@@ -1217,11 +1240,32 @@ int copy_user_string(char *dst, unsigned src, unsigned capacity) {
 /* ---------- interrupt dispatch ---------- */
 void isr_handler(struct regs *r) {
     if (r->int_no == 128) {
-        r->eax = (unsigned)syscall_handler(
+        int result = syscall_handler(
             r->eax,
             r->ebx,
             r->ecx
         );
+
+        if (result == SYSCALL_TERMINATE) {
+            if (!active_user_pid ||
+                !process_exit(active_user_pid, (int)r->ebx)) {
+                panic("invalid process exit request");
+            }
+
+            /* Stop using the process's page directory. */
+            paging_switch_directory(address_space_kernel_directory());
+
+            /* Restore the kernel's normal privilege-transition stack. */
+            tss_set_stack(0x90000u);
+
+            /*
+             * This restores the original kernel stack saved by
+             * enter_user_mode(), returning to user_mode_test().
+             */
+            leave_user_mode();
+        }
+
+        r->eax = (unsigned)result;
         return;
     }
     if (r->int_no >= 32) {
