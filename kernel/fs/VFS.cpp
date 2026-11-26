@@ -805,33 +805,65 @@ int vfs_write_fd(
     return (int)size;
 }
 
+
 int vfs_seek(int fd, int offset, unsigned origin) {
     if (!valid_fd(fd))
         return -1;
 
     VfsFileDescriptor *file = &file_descriptors[fd];
 
-    int base;
+    unsigned base;
 
     if (origin == VFS_SEEK_SET) {
         base = 0;
     } else if (origin == VFS_SEEK_CUR) {
-        base = (int)file->position;
+        base = file->position;
     } else if (origin == VFS_SEEK_END) {
-        base = (int)file->size;
+        base = file->size;
     } else {
         return -1;
     }
 
-    int position = base + offset;
+    unsigned position;
 
-    if (position < 0 || position > VFS_FILE_MAX)
+    if (offset < 0) {
+        /*
+         * Avoid negating INT_MIN directly.
+         */
+        unsigned magnitude =
+            (unsigned)(-(offset + 1)) + 1;
+
+        if (magnitude > base)
+            return -1;
+
+        position = base - magnitude;
+    } else {
+        unsigned amount = (unsigned)offset;
+
+        if (amount > 0x7FFFFFFFu - base)
+            return -1;
+
+        position = base + amount;
+    }
+
+    /*
+     * Read-only descriptors can seek throughout the
+     * entire file. Writable descriptors remain bounded
+     * until streaming writes are implemented.
+     */
+    unsigned limit =
+        (file->flags & VFS_O_WRITE)
+            ? VFS_FILE_MAX
+            : file->size;
+
+    if (position > limit)
         return -1;
 
-    file->position = (unsigned)position;
+    file->position = position;
 
-    return position;
+    return (int)position;
 }
+
 
 int vfs_tell(int fd) {
     if (!valid_fd(fd))
