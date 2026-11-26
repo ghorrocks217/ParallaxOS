@@ -1751,6 +1751,146 @@ static void cmd_write(char *argument) {
         kputs("file written\n");
 }
 
+
+static void cmd_fdtest(void) {
+    static const char path[] = "/fdtest.tmp";
+    static const char payload[] = "Parallax FD test";
+
+    char buffer[32];
+    unsigned payload_size = sizeof(payload) - 1;
+
+    /* Remove leftovers from a previous test. */
+    if (vfs_exists(path))
+        vfs_remove(path);
+
+    /* Create a new file and open it for reading and writing. */
+    int fd = vfs_open(
+        path,
+        VFS_O_READ | VFS_O_WRITE |
+        VFS_O_CREATE | VFS_O_TRUNC
+    );
+
+    if (fd < 0) {
+        kputs("FD test FAILED: open/create.\n");
+        return;
+    }
+
+    /* Write the test payload. */
+    if (vfs_write_fd(fd, payload, payload_size) !=
+        (int)payload_size) {
+        kputs("FD test FAILED: write.\n");
+        vfs_close(fd);
+        vfs_remove(path);
+        return;
+    }
+
+    /* Seek back to the beginning. */
+    if (vfs_seek(fd, 0, VFS_SEEK_SET) != 0) {
+        kputs("FD test FAILED: seek.\n");
+        vfs_close(fd);
+        vfs_remove(path);
+        return;
+    }
+
+    /* Read back through the same descriptor. */
+    int count = vfs_read_fd(fd, buffer, payload_size);
+
+    int matches = count == (int)payload_size;
+
+    for (unsigned i = 0; matches && i < payload_size; ++i) {
+        if (buffer[i] != payload[i])
+            matches = 0;
+    }
+
+    if (!matches) {
+        kputs("FD test FAILED: read/compare.\n");
+        vfs_close(fd);
+        vfs_remove(path);
+        return;
+    }
+
+    if (!vfs_close(fd)) {
+        kputs("FD test FAILED: close/flush.\n");
+        return;
+    }
+
+    /* Reopen to verify that close persisted the data. */
+    fd = vfs_open(path, VFS_O_READ);
+
+    if (fd < 0) {
+        kputs("FD test FAILED: reopen.\n");
+        vfs_remove(path);
+        return;
+    }
+
+    count = vfs_read_fd(fd, buffer, payload_size);
+
+    matches = count == (int)payload_size;
+
+    for (unsigned i = 0; matches && i < payload_size; ++i) {
+        if (buffer[i] != payload[i])
+            matches = 0;
+    }
+
+    if (!vfs_close(fd)) {
+        kputs("FD test FAILED: second close.\n");
+        return;
+    }
+
+    if (!matches) {
+        kputs("FD test FAILED: persisted data mismatch.\n");
+        vfs_remove(path);
+        return;
+    }
+
+    /* Verify append mode. */
+    fd = vfs_open(
+        path,
+        VFS_O_READ | VFS_O_WRITE | VFS_O_APPEND
+    );
+
+    if (fd < 0 ||
+        vfs_write_fd(fd, "!", 1) != 1 ||
+        !vfs_close(fd)) {
+        kputs("FD test FAILED: append.\n");
+
+        if (fd >= 0)
+            vfs_close(fd);
+
+        vfs_remove(path);
+        return;
+    }
+
+    /* Verify the appended byte. */
+    fd = vfs_open(path, VFS_O_READ);
+
+    if (fd < 0) {
+        kputs("FD test FAILED: final reopen.\n");
+        vfs_remove(path);
+        return;
+    }
+
+    count = vfs_read_fd(fd, buffer, payload_size + 1);
+
+    matches = count == (int)(payload_size + 1);
+
+    for (unsigned i = 0; matches && i < payload_size; ++i) {
+        if (buffer[i] != payload[i])
+            matches = 0;
+    }
+
+    if (matches && buffer[payload_size] != '!')
+        matches = 0;
+
+    vfs_close(fd);
+    vfs_remove(path);
+
+    if (matches)
+        kputs("FD test PASSED: create, write, seek, read, close, reopen, append.\n");
+    else
+        kputs("FD test FAILED: append verification.\n");
+}
+
 static int path_is_same_or_parent(
     const char *candidate,
     const char *directory
@@ -2047,7 +2187,9 @@ static void run_command(char *input) {
               "  fatinfo         show mounted FAT16 filesystem information\n"
               "  fatls [path]    list a FAT16 directory\n"
               "  fatcat <path>   read a FAT16 file\n"
-              "  fatcheck        compare FAT16 allocation table copies\n");
+              "  fatcheck        compare FAT16 allocation table copies\n"
+              "  write <file> <text>  write text to file\n"
+              "  fdtest          test VFS file descriptors\n");
     } else if (streq(cmd, "clear")) {
         clear();
     } else if (streq(cmd, "echo")) {
@@ -2140,6 +2282,10 @@ static void run_command(char *input) {
         cmd_fatcat(args);
     } else if (streq(cmd, "fatcheck")) {
         cmd_fatcheck();
+    } else if (streq(cmd, "write")) {
+        cmd_write(args);
+    } else if (streq(cmd, "fdtest")) {
+        cmd_fdtest();
     } else {
         kprintf("unknown command: %s (try 'help')\n", cmd);
     }
