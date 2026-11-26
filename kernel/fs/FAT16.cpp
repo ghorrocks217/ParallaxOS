@@ -242,6 +242,38 @@ static int allocate_cluster(unsigned *result) {
     return 0;
 }
 
+static int free_cluster_chain(unsigned first_cluster) {
+    if (!valid_cluster(first_cluster))
+        return 0;
+
+    unsigned cluster = first_cluster;
+
+    for (unsigned steps = 0; steps < fs.cluster_count; ++steps) {
+        unsigned next = 0;
+        int result = next_cluster(cluster, &next);
+
+        if (result == 2)
+            return write_fat_entry(cluster, 0);
+
+        if (result != 1)
+            return 0;
+
+        if (!write_fat_entry(cluster, 0))
+            return 0;
+
+        cluster = next;
+    }
+
+    return 0;
+}
+
+static int link_clusters(unsigned first, unsigned second) {
+    if (!valid_cluster(first) || !valid_cluster(second))
+        return 0;
+
+    return write_fat_entry(first, second);
+}
+
 /*
  * Convert a FAT 8.3 directory entry into a printable name.
  * Long filename entries are deliberately skipped for now.
@@ -910,6 +942,7 @@ extern "C" int fat16_stat(
     return 1;
 }
 
+
 extern "C" int fat16_write(
     const char *path,
     const char *data,
@@ -921,7 +954,6 @@ extern "C" int fat16_write(
     unsigned parent_cluster;
     unsigned entry_lba;
     unsigned entry_offset;
-
     unsigned char entry[FAT16_ENTRY_SIZE];
 
     if (!resolve_file(
@@ -932,7 +964,6 @@ extern "C" int fat16_write(
             &entry_offset))
         return 0;
 
-    /* Do not write directories or read-only files. */
     if (entry[11] & (0x01 | FAT16_ATTR_DIRECTORY))
         return 0;
 
@@ -949,43 +980,101 @@ extern "C" int fat16_write(
 
     if (needed_clusters > fs.cluster_count)
         return 0;
+
     /*
-     * This first implementation only overwrites files using
-     * their existing cluster chain. It does not allocate clusters.
+     * Count the existing cluster chain.
      */
+    unsigned existing_clusters = 0;
+    unsigned last_existing = 0;
 
-    if (needed_clusters && !valid_cluster(first_cluster))
-        return 0;
+    if (valid_cluster(first_cluster)) {
+        unsigned cluster = first_cluster;
 
-    /* Verify that the existing chain is large enough. */
-    unsigned cluster = first_cluster;
-    unsigned available_clusters = 0;
+        while (existing_clusters < fs.cluster_count) {
+            ++existing_clusters;
+            last_existing = cluster;
 
-    if (needed_clusters) {
-        if (!valid_cluster(cluster))
-            return 0;
-
-        available_clusters = 1;
-
-        while (available_clusters < needed_clusters) {
             unsigned next;
+            int result = next_cluster(cluster, &next);
 
-            if (next_cluster(cluster, &next) != 1)
+            if (result == 2)
+                break;
+
+            if (result != 1)
                 return 0;
 
             cluster = next;
-            ++available_clusters;
+        }
+
+        if (existing_clusters == fs.cluster_count) {
+            unsigned next;
+
+            if (next_cluster(last_existing, &next) == 1)
+                return 0;
+        }
+    } else if (first_cluster != 0) {
+        return 0;
+    }
+
+    /*
+     * Allocate the additional clusters as a separate chain.
+     */
+    unsigned additional_needed = 0;
+
+    if (needed_clusters > existing_clusters)
+        additional_needed = needed_clusters - existing_clusters;
+
+    unsigned new_chain = 0;
+    unsigned new_chain_tail = 0;
+
+    for (unsigned i = 0; i < additional_needed; ++i) {
+        unsigned allocated;
+
+        if (!allocate_cluster(&allocated)) {
+            if (new_chain)
+                free_cluster_chain(new_chain);
+
+            return 0;
+        }
+
+        if (!new_chain) {
+            new_chain = allocated;
+            new_chain_tail = allocated;
+        } else {
+            if (!link_clusters(new_chain_tail, allocated)) {
+                write_fat_entry(allocated, 0);
+                free_cluster_chain(new_chain);
+                return 0;
+            }
+
+            new_chain_tail = allocated;
         }
     }
 
     /*
-     * Write file contents, one sector at a time.
-     * The final sector is zero-padded.
+     * Attach the new chain to the existing file.
      */
-    cluster = first_cluster;
+    if (new_chain) {
+        if (existing_clusters) {
+            if (!link_clusters(last_existing, new_chain)) {
+                free_cluster_chain(new_chain);
+                return 0;
+            }
+        } else {
+            first_cluster = new_chain;
+        }
+    }
+
+    /*
+     * Write file data.
+     */
     unsigned written = 0;
+    unsigned cluster = first_cluster;
 
     for (unsigned c = 0; c < needed_clusters; ++c) {
+        if (!valid_cluster(cluster))
+            return 0;
+
         unsigned first_sector = cluster_to_sector(cluster);
 
         for (unsigned s = 0;
@@ -998,10 +1087,9 @@ extern "C" int fat16_write(
             );
 
             for (unsigned i = 0; i < FAT16_SECTOR_SIZE; ++i) {
-                if (i < amount)
-                    sector_buffer[i] = (unsigned char)data[written + i];
-                else
-                    sector_buffer[i] = 0;
+                sector_buffer[i] = i < amount
+                    ? (unsigned char)data[written + i]
+                    : 0;
             }
 
             if (!write_sector(first_sector + s, sector_buffer))
@@ -1024,12 +1112,26 @@ extern "C" int fat16_write(
     if (written != size)
         return 0;
 
-    /* Update the file size in its directory entry. */
+    /*
+     * Update the directory entry.
+     */
     if (!read_sector(entry_lba, sector_buffer))
         return 0;
 
+    sector_buffer[entry_offset + 20] =
+        (unsigned char)(first_cluster >> 16);
+
+    sector_buffer[entry_offset + 21] =
+        (unsigned char)(first_cluster >> 24);
+
+    sector_buffer[entry_offset + 26] =
+        (unsigned char)first_cluster;
+
+    sector_buffer[entry_offset + 27] =
+        (unsigned char)(first_cluster >> 8);
+
     sector_buffer[entry_offset + 28] =
-        (unsigned char)(size);
+        (unsigned char)size;
 
     sector_buffer[entry_offset + 29] =
         (unsigned char)(size >> 8);
