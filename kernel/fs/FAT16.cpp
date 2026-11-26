@@ -926,6 +926,37 @@ static int resolve_file(
     );
 }
 
+/*
+ * Check whether a directory can be modified.
+ * The FAT16 root directory is always considered writable.
+ */
+static int directory_is_writable(const char *path) {
+    if (!path || path[0] != '/')
+        return 0;
+
+    if (string_equal_ci(path, "/"))
+        return 1;
+
+    unsigned parent_cluster;
+    unsigned char entry[FAT16_ENTRY_SIZE];
+
+    if (!resolve_file(
+            path,
+            &parent_cluster,
+            entry,
+            0,
+            0))
+        return 0;
+
+    if (!(entry[11] & FAT16_ATTR_DIRECTORY))
+        return 0;
+
+    if (entry[11] & FAT16_ATTR_READ_ONLY)
+        return 0;
+
+    return 1;
+}
+
 static int is_fat16_boot_sector(const unsigned char *boot) {
     if (boot[510] != 0x55 || boot[511] != 0xAA)
         return 0;
@@ -1351,6 +1382,9 @@ extern "C" int fat16_create(const char *path) {
     if (!resolve_directory(parent_path, &directory_cluster))
         return 0;
 
+    if (!directory_is_writable(parent_path))
+        return 0;
+
     /*
      * Reject duplicate filenames.
      */
@@ -1447,6 +1481,9 @@ extern "C" int fat16_mkdir(const char *path) {
     unsigned parent_cluster;
 
     if (!resolve_directory(parent_path, &parent_cluster))
+        return 0;
+
+    if (!directory_is_writable(parent_path))
         return 0;
 
     /* Reject duplicate names. */
@@ -1556,8 +1593,8 @@ extern "C" int fat16_remove(const char *path) {
 
     unsigned attributes = entry[11];
 
-    /* Never remove read-only or volume-label entries. */
-    if (entry[11] & (FAT16_ATTR_READ_ONLY | FAT16_ATTR_DIRECTORY))
+    /* Never remove read-only entries or volume labels. */
+    if (entry[11] & (FAT16_ATTR_READ_ONLY | FAT16_ATTR_VOLUME))
         return 0;
 
     unsigned first_cluster =

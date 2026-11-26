@@ -1751,6 +1751,38 @@ static void cmd_write(char *argument) {
         kputs("file written\n");
 }
 
+static int path_is_same_or_parent(
+    const char *candidate,
+    const char *directory
+) {
+    unsigned i = 0;
+
+    while (candidate[i] && directory[i]) {
+        char a = candidate[i];
+        char b = directory[i];
+
+        if (a >= 'a' && a <= 'z')
+            a -= 32;
+
+        if (b >= 'a' && b <= 'z')
+            b -= 32;
+
+        if (a != b)
+            return 0;
+
+        ++i;
+    }
+
+    /*
+     * Candidate must be a complete path component,
+     * not merely a matching string prefix.
+     */
+    if (candidate[i] == '\0')
+        return 1;
+
+    return 0;
+}
+
 static void cmd_rm(const char *argument) {
     char path[VFS_PATH_MAX];
 
@@ -1759,16 +1791,9 @@ static void cmd_rm(const char *argument) {
         return;
     }
 
-    if (fs_strlen(path) == fs_strlen(current_directory)) {
-        unsigned i = 0;
-
-        while (path[i] && path[i] == current_directory[i])
-            ++i;
-
-        if (!path[i] && !current_directory[i]) {
-            kputs("cannot remove your current directory\n");
-            return;
-        }
+    if (path_is_same_or_parent(path, current_directory)) {
+        kputs("cannot remove your current directory or one of its parents\n");
+        return;
     }
 
     if (!vfs_remove(path))
