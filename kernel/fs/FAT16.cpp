@@ -995,13 +995,15 @@ static int resolve_file(
     if (!resolve_directory(parent_path, parent_cluster))
         return 0;
 
-    return find_entry(
+    int result = find_entry(
         *parent_cluster,
         short_name,
         output,
         entry_lba,
         entry_offset
     );
+
+    return result == 1;
 }
 
 /*
