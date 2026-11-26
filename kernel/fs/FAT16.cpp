@@ -306,6 +306,12 @@ static int read_directory_entry(
 
     unsigned offset = entry_in_sector * FAT16_ENTRY_SIZE;
 
+    if (entry_lba)
+        *entry_lba = lba;
+
+    if (entry_offset)
+        *entry_offset = offset;
+
     for (unsigned i = 0; i < FAT16_ENTRY_SIZE; ++i)
         output[i] = sector_buffer[offset + i];
 
