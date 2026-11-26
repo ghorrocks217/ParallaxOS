@@ -1080,6 +1080,55 @@ extern "C" int fat16_create(const char *path) {
     return 0;
 }
 
+extern "C" int fat16_remove(const char *path) {
+    if (!fs.mounted || !path)
+        return 0;
+
+    unsigned parent_cluster;
+    unsigned entry_lba;
+    unsigned entry_offset;
+    unsigned char entry[FAT16_ENTRY_SIZE];
+
+    if (!resolve_file(
+            path,
+            &parent_cluster,
+            entry,
+            &entry_lba,
+            &entry_offset))
+        return 0;
+
+    /* Directories and read-only files cannot be removed here. */
+    if (entry[11] & (FAT16_ATTR_DIRECTORY | 0x01))
+        return 0;
+
+    unsigned first_cluster =
+        ((unsigned)read16(entry + 20) << 16) |
+        read16(entry + 26);
+
+    /* Only zero or valid FAT16 data clusters are accepted. */
+    if (first_cluster != 0 && !valid_cluster(first_cluster))
+        return 0;
+
+    /*
+     * Mark the directory entry deleted first.
+     * If freeing clusters later fails, this may leak space,
+     * but it won't leave a live file pointing at freed clusters.
+     */
+    if (!read_sector(entry_lba, sector_buffer))
+        return 0;
+
+    sector_buffer[entry_offset] = 0xE5;
+
+    if (!write_sector(entry_lba, sector_buffer))
+        return 0;
+
+    /* Empty files have no cluster chain to release. */
+    if (first_cluster == 0)
+        return 1;
+
+    return free_cluster_chain(first_cluster);
+}
+
 extern "C" int fat16_write(
     const char *path,
     const char *data,

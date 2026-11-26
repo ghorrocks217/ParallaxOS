@@ -65,8 +65,10 @@ int vfs_mkdir(const char *path) {
 }
 
 int vfs_remove(const char *path) {
-    if (is_disk_path(path))
-        return 0;
+    if (is_disk_path(path)) {
+        const char *relative = disk_relative_path(path);
+        return fat16_remove(relative);
+    }
 
     return ramfs_remove(path);
 }
