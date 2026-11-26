@@ -33,6 +33,78 @@ struct Fat16State {
 static Fat16State fs;
 static unsigned char sector_buffer[FAT16_SECTOR_SIZE];
 
+#define FAT16_CACHE_SIZE 4
+
+struct Fat16CacheEntry {
+    int valid;
+    unsigned lba;
+    unsigned age;
+    unsigned char data[FAT16_SECTOR_SIZE];
+};
+
+static Fat16CacheEntry fat_cache[FAT16_CACHE_SIZE];
+static unsigned fat_cache_age = 0;
+
+static int read_sector(unsigned lba, void *buffer);
+static int write_sector(unsigned lba, const void *buffer);
+
+static void fat_cache_invalidate(void) {
+    for (unsigned i = 0; i < FAT16_CACHE_SIZE; ++i) {
+        fat_cache[i].valid = 0;
+        fat_cache[i].age = 0;
+    }
+
+    fat_cache_age = 0;
+}
+
+static int fat_cache_read(unsigned lba, unsigned char *buffer) {
+    if (!buffer)
+        return 0;
+
+    /* Check for a cached sector. */
+    for (unsigned i = 0; i < FAT16_CACHE_SIZE; ++i) {
+        if (fat_cache[i].valid && fat_cache[i].lba == lba) {
+            for (unsigned j = 0; j < FAT16_SECTOR_SIZE; ++j)
+                buffer[j] = fat_cache[i].data[j];
+
+            fat_cache[i].age = ++fat_cache_age;
+            return 1;
+        }
+    }
+
+    /* Find an invalid entry or the least recently used entry. */
+    unsigned slot = 0;
+
+    for (unsigned i = 0; i < FAT16_CACHE_SIZE; ++i) {
+        if (!fat_cache[i].valid) {
+            slot = i;
+            break;
+        }
+
+        if (fat_cache[i].age < fat_cache[slot].age)
+            slot = i;
+    }
+
+    if (!read_sector(lba, fat_cache[slot].data))
+        return 0;
+
+    fat_cache[slot].valid = 1;
+    fat_cache[slot].lba = lba;
+    fat_cache[slot].age = ++fat_cache_age;
+
+    for (unsigned j = 0; j < FAT16_SECTOR_SIZE; ++j)
+        buffer[j] = fat_cache[slot].data[j];
+
+    return 1;
+}
+
+static void fat_cache_invalidate_sector(unsigned lba) {
+    for (unsigned i = 0; i < FAT16_CACHE_SIZE; ++i) {
+        if (fat_cache[i].valid && fat_cache[i].lba == lba)
+            fat_cache[i].valid = 0;
+    }
+}
+
 static unsigned read16(const unsigned char *p) {
     return (unsigned)p[0] | ((unsigned)p[1] << 8);
 }
@@ -125,7 +197,7 @@ static int next_cluster(unsigned cluster, unsigned *next) {
                           fat_offset / FAT16_SECTOR_SIZE;
     unsigned entry_offset = fat_offset % FAT16_SECTOR_SIZE;
 
-    if (!read_sector(fat_sector, sector_buffer))
+    if (!fat_cache_read(fat_sector, sector_buffer))
         return 0;
 
     unsigned value = read16(sector_buffer + entry_offset);
@@ -151,7 +223,7 @@ static int read_fat_entry(unsigned cluster, unsigned *value) {
     unsigned lba = fs.fat_start + offset / FAT16_SECTOR_SIZE;
     unsigned entry_offset = offset % FAT16_SECTOR_SIZE;
 
-    if (!read_sector(lba, sector_buffer))
+    if (!fat_cache_read(lba, sector_buffer))
         return 0;
 
     *value = read16(sector_buffer + entry_offset);
@@ -183,6 +255,10 @@ static int write_fat_entry(unsigned cluster, unsigned value) {
 
         if (!write_sector(lba, sector_buffer))
             return 0;
+
+        /* Reads use the first FAT copy, so invalidate its cached sector. */
+        if (copy == 0)
+            fat_cache_invalidate_sector(lba);
     }
 
     return 1;
@@ -793,6 +869,7 @@ static int resolve_file(
 
 extern "C" int fat16_mount(unsigned device_index) {
     fs.mounted = 0;
+    fat_cache_invalidate();
 
     if (!block_device_get(device_index, &fs.device))
         return 0;
