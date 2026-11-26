@@ -308,21 +308,46 @@ static int read_fat_entry(unsigned cluster, unsigned *value) {
 }
 
 static int write_fat_entry(unsigned cluster, unsigned value) {
-    if (!valid_cluster(cluster))
+    if (!fs.mounted || !valid_cluster(cluster))
+        return 0;
+
+    if (fs.fat_count == 0 || fs.fat_count > 2)
         return 0;
 
     unsigned offset = cluster * 2;
     unsigned relative_sector = offset / FAT16_SECTOR_SIZE;
     unsigned entry_offset = offset % FAT16_SECTOR_SIZE;
 
+    /*
+     * Preserve the original sector from every FAT copy
+     * before modifying any of them.
+     */
+    static unsigned char original[2][FAT16_SECTOR_SIZE];
+
+    unsigned lbas[2];
+
     for (unsigned copy = 0; copy < fs.fat_count; ++copy) {
-        unsigned lba =
+        lbas[copy] =
             fs.fat_start +
             copy * fs.sectors_per_fat +
             relative_sector;
 
-        if (!read_sector(lba, sector_buffer))
+        if (!read_sector(lbas[copy], original[copy])) {
+            for (unsigned i = 0; i <= copy; ++i)
+                fat_cache_invalidate_sector(lbas[i]);
+
             return 0;
+        }
+    }
+
+    /*
+     * Update every FAT copy.
+     */
+    unsigned written = 0;
+
+    for (unsigned copy = 0; copy < fs.fat_count; ++copy) {
+        for (unsigned i = 0; i < FAT16_SECTOR_SIZE; ++i)
+            sector_buffer[i] = original[copy][i];
 
         sector_buffer[entry_offset] =
             (unsigned char)value;
@@ -330,13 +355,30 @@ static int write_fat_entry(unsigned cluster, unsigned value) {
         sector_buffer[entry_offset + 1] =
             (unsigned char)(value >> 8);
 
-        if (!write_sector(lba, sector_buffer))
-            return 0;
+        if (!write_sector(lbas[copy], sector_buffer)) {
+            /*
+             * The failed write may have partially reached
+             * the device, so attempt to restore it too.
+             */
+            for (unsigned i = 0; i <= copy; ++i) {
+                if (!write_sector(lbas[i], original[i])) {
+                    // Rollback failure means disk state is uncertain.
+                }
 
-        /* Reads use the first FAT copy, so invalidate its cached sector. */
-        if (copy == 0)
-            fat_cache_invalidate_sector(lba);
+                fat_cache_invalidate_sector(lbas[i]);
+            }
+
+            return 0;
+        }
+
+        ++written;
     }
+
+    /*
+     * Invalidate cached sectors after successful writes.
+     */
+    for (unsigned copy = 0; copy < written; ++copy)
+        fat_cache_invalidate_sector(lbas[copy]);
 
     return 1;
 }
