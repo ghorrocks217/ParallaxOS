@@ -31,10 +31,22 @@ int ramfs_read_at(
     unsigned size
 );
 
+int ramfs_write_at(
+    const char *path,
+    unsigned offset,
+    const char *buffer,
+    unsigned size
+);
+
 int ramfs_list(
     const char *path,
     struct vfs_dirent *entries,
     unsigned capacity
+);
+
+int ramfs_truncate(
+    const char *path,
+    unsigned size
 );
 
 int ramfs_stat(

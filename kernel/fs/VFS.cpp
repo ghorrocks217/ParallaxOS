@@ -142,6 +142,24 @@ static int ramfs_driver_read_at(
     return ramfs_read_at(path, offset, buffer, size);
 }
 
+static int ramfs_driver_write_at(
+    void *,
+    const char *path,
+    unsigned offset,
+    const char *buffer,
+    unsigned size
+) {
+    return ramfs_write_at(path, offset, buffer, size);
+}
+
+static int ramfs_driver_truncate(
+    void *,
+    const char *path,
+    unsigned size
+) {
+    return ramfs_truncate(path, size);
+}
+
 static int ramfs_driver_list(
     void *,
     const char *path,
@@ -168,7 +186,9 @@ static const vfs_fs_ops ramfs_operations = {
     ramfs_driver_read,
     ramfs_driver_list,
     ramfs_driver_stat,
-    ramfs_driver_read_at
+    ramfs_driver_read_at,
+    ramfs_driver_write_at,
+    ramfs_driver_truncate
 };
 
 /* FAT16 */
@@ -239,7 +259,9 @@ static const vfs_fs_ops fat16_operations = {
     fat16_driver_read,
     fat16_driver_list,
     fat16_driver_stat,
-    fat16_driver_read_at
+    fat16_driver_read_at,
+    0,
+    0
 };
 
 /* ---------------------------------------------------------
@@ -539,6 +561,13 @@ int vfs_read_at(
     char *buffer,
     unsigned size
 ) {
+    if (!buffer && size)
+        return -1;
+
+    if (offset > 0x7FFFFFFFu ||
+        size > 0x7FFFFFFFu - offset)
+        return -1;
+
     ResolvedPath resolved;
 
     if (!resolve_path(path, &resolved))
@@ -552,6 +581,28 @@ int vfs_read_at(
         resolved.relative_path,
         offset,
         buffer,
+        size
+    );
+}
+
+int vfs_truncate(
+    const char *path,
+    unsigned size
+) {
+    if (size > 0x7FFFFFFFu)
+        return 0;
+
+    ResolvedPath resolved;
+
+    if (!resolve_path(path, &resolved))
+        return 0;
+
+    if (!resolved.mount->ops->truncate)
+        return 0;
+
+    return resolved.mount->ops->truncate(
+        resolved.mount->context,
+        resolved.relative_path,
         size
     );
 }

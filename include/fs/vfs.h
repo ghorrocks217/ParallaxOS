@@ -76,6 +76,20 @@ struct vfs_fs_ops {
         char *buffer,
         unsigned size
     );
+
+    int (*write_at)(
+        void *context,
+        const char *path,
+        unsigned offset,
+        const char *buffer,
+        unsigned size
+    );
+
+    int (*truncate)(
+        void *context,
+        const char *path,
+        unsigned size
+    );
 };
 
 #ifdef __cplusplus
@@ -117,6 +131,15 @@ int vfs_read_at(
     char *buffer,
     unsigned size
 );
+
+int vfs_write_at(
+    const char *path,
+    unsigned offset,
+    const char *buffer,
+    unsigned size
+);
+
+int vfs_truncate(const char *path, unsigned size);
 
 int vfs_stat(
     const char *path,
