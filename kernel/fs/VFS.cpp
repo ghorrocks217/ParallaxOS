@@ -13,15 +13,17 @@
  */
 
 static int is_disk_path(const char *path) {
+    static const char mount[] = "/disk";
+
     if (!path)
         return 0;
 
-    return path[0] == '/' &&
-           path[1] == 'd' &&
-           path[2] == 'i' &&
-           path[3] == 's' &&
-           path[4] == 'k' &&
-           (path[5] == '\0' || path[5] == '/');
+    for (unsigned i = 0; i < 5; ++i) {
+        if (!path[i] || path[i] != mount[i])
+            return 0;
+    }
+
+    return path[5] == '\0' || path[5] == '/';
 }
 
 static const char *disk_relative_path(const char *path) {
@@ -71,8 +73,11 @@ int vfs_write(
     const char *data,
     unsigned size
 ) {
-    if (is_disk_path(path))
-        return 0;
+    if (is_disk_path(path)) {
+        const char *relative = disk_relative_path(path);
+
+        return fat16_write(relative, data, size);
+    }
 
     return ramfs_write(path, data, size);
 }

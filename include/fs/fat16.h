@@ -42,6 +42,12 @@ int fat16_read(
     unsigned capacity
 );
 
+int fat16_write(
+    const char *path,
+    const char *data,
+    unsigned size
+);
+
 #ifdef __cplusplus
 }
 #endif

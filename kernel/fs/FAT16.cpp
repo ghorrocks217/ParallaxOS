@@ -96,6 +96,16 @@ static int read_sector(unsigned lba, void *buffer) {
     return fs.device.read(fs.device.id, lba, 1, buffer);
 }
 
+static int write_sector(unsigned lba, const void *buffer) {
+    if (!fs.mounted || !buffer)
+        return 0;
+
+    if (lba >= fs.device.sector_count)
+        return 0;
+
+    return fs.device.write(fs.device.id, lba, 1, buffer);
+}
+
 static unsigned cluster_to_sector(unsigned cluster) {
     return fs.data_start +
         (cluster - FAT16_CLUSTER_MIN) * fs.sectors_per_cluster;
@@ -231,7 +241,9 @@ static int make_short_name(
 static int read_directory_entry(
     unsigned root_cluster,
     unsigned index,
-    unsigned char output[FAT16_ENTRY_SIZE]
+    unsigned char output[FAT16_ENTRY_SIZE],
+    unsigned *entry_lba,
+    unsigned *entry_offset
 ) {
     if (root_cluster == 0) {
         if (index >= fs.root_entries)
@@ -243,6 +255,12 @@ static int read_directory_entry(
 
         unsigned offset =
             (index * FAT16_ENTRY_SIZE) % FAT16_SECTOR_SIZE;
+
+        if (entry_lba)
+            *entry_lba = lba;
+
+        if (entry_offset)
+            *entry_offset = offset;
 
         if (!read_sector(lba, sector_buffer))
             return -1;
@@ -297,7 +315,9 @@ static int read_directory_entry(
 static int find_entry(
     unsigned directory_cluster,
     const unsigned char name[11],
-    unsigned char output[FAT16_ENTRY_SIZE]
+    unsigned char output[FAT16_ENTRY_SIZE],
+    unsigned *entry_lba,
+    unsigned *entry_offset
 ) {
     unsigned max_entries;
 
@@ -312,8 +332,15 @@ static int find_entry(
     for (unsigned i = 0; i < max_entries; ++i) {
         unsigned char entry[FAT16_ENTRY_SIZE];
 
+        unsigned current_lba;
+        unsigned current_offset;
+
         int result = read_directory_entry(
-            directory_cluster, i, entry
+            directory_cluster,
+            i,
+            entry,
+            &current_lba,
+            &current_offset
         );
 
         if (result <= 0)
@@ -344,6 +371,12 @@ static int find_entry(
             for (unsigned j = 0; j < FAT16_ENTRY_SIZE; ++j)
                 output[j] = entry[j];
 
+            if (entry_lba)
+                *entry_lba = current_lba;
+
+            if (entry_offset)
+                *entry_offset = current_offset;
+
             return 1;
         }
     }
@@ -360,6 +393,9 @@ static int resolve_directory(
     unsigned *result_cluster
 ) {
     if (!path || !result_cluster || path[0] != '/')
+        return 0;
+
+    if (string_length(path) >= VFS_PATH_MAX)
         return 0;
 
     unsigned current = 0;
@@ -398,7 +434,7 @@ static int resolve_directory(
         if (!make_short_name(component, short_name))
             return 0;
 
-        if (!find_entry(current, short_name, entry))
+        if (!find_entry(current, short_name, entry, 0, 0))
             return 0;
 
         if (!(entry[11] & FAT16_ATTR_DIRECTORY))
@@ -417,14 +453,16 @@ static int resolve_directory(
 static int resolve_file(
     const char *path,
     unsigned *parent_cluster,
-    unsigned char output[FAT16_ENTRY_SIZE]
+    unsigned char output[FAT16_ENTRY_SIZE],
+    unsigned *entry_lba,
+    unsigned *entry_offset
 ) {
     if (!path || path[0] != '/')
         return 0;
 
     unsigned length = string_length(path);
 
-    if (length < 2 || path[length - 1] == '/')
+    if (length < 2 || length >= VFS_PATH_MAX || path[length - 1] == '/')
         return 0;
 
     unsigned split = length;
@@ -467,7 +505,13 @@ static int resolve_file(
     if (!resolve_directory(parent_path, parent_cluster))
         return 0;
 
-    return find_entry(*parent_cluster, short_name, output);
+    return find_entry(
+        *parent_cluster,
+        short_name,
+        output,
+        entry_lba,
+        entry_offset
+    );
 }
 
 extern "C" int fat16_mount(unsigned device_index) {
@@ -602,7 +646,11 @@ extern "C" int fat16_list(
         unsigned char entry[FAT16_ENTRY_SIZE];
 
         int result = read_directory_entry(
-            directory_cluster, i, entry
+            directory_cluster,
+            i,
+            entry,
+            0,
+            0
         );
 
         if (result <= 0)
@@ -647,7 +695,7 @@ extern "C" int fat16_read(
     unsigned parent_cluster;
     unsigned char entry[FAT16_ENTRY_SIZE];
 
-    if (!resolve_file(path, &parent_cluster, entry))
+    if (!resolve_file(path, &parent_cluster, entry, 0, 0))
         return -1;
 
     if (entry[11] & FAT16_ATTR_DIRECTORY)
@@ -741,7 +789,7 @@ extern "C" int fat16_stat(
     unsigned parent_cluster;
     unsigned char entry[FAT16_ENTRY_SIZE];
 
-    if (!resolve_file(path, &parent_cluster, entry))
+    if (!resolve_file(path, &parent_cluster, entry, 0, 0))
         return 0;
 
     if (type) {
@@ -751,6 +799,131 @@ extern "C" int fat16_stat(
 
     if (size)
         *size = read32(entry + 28);
+
+    return 1;
+}
+
+extern "C" int fat16_write(
+    const char *path,
+    const char *data,
+    unsigned size
+) {
+    if (!fs.mounted || !path || (!data && size))
+        return 0;
+
+    unsigned parent_cluster;
+    unsigned entry_lba;
+    unsigned entry_offset;
+
+    unsigned char entry[FAT16_ENTRY_SIZE];
+
+    if (!resolve_file(
+            path,
+            &parent_cluster,
+            entry,
+            &entry_lba,
+            &entry_offset))
+        return 0;
+
+    /* Do not write directories or read-only files. */
+    if (entry[11] & (0x01 | FAT16_ATTR_DIRECTORY))
+        return 0;
+
+    unsigned first_cluster =
+        ((unsigned)read16(entry + 20) << 16) |
+        read16(entry + 26);
+
+    unsigned cluster_bytes =
+        fs.sectors_per_cluster * FAT16_SECTOR_SIZE;
+
+    unsigned needed_clusters =
+        size / cluster_bytes +
+        (size % cluster_bytes != 0);
+
+    /*
+     * This first implementation only overwrites files using
+     * their existing cluster chain. It does not allocate clusters.
+     */
+
+    if (needed_clusters && !valid_cluster(first_cluster))
+        return 0;
+
+    /* Verify that the existing chain is large enough. */
+    unsigned cluster = first_cluster;
+
+    for (unsigned i = 1; i < needed_clusters; ++i) {
+        unsigned next;
+
+        if (next_cluster(cluster, &next) != 1)
+            return 0;
+
+        cluster = next;
+    }
+
+    /*
+     * Write file contents, one sector at a time.
+     * The final sector is zero-padded.
+     */
+    cluster = first_cluster;
+    unsigned written = 0;
+
+    for (unsigned c = 0; c < needed_clusters; ++c) {
+        unsigned first_sector = cluster_to_sector(cluster);
+
+        for (unsigned s = 0;
+             s < fs.sectors_per_cluster && written < size;
+             ++s) {
+
+            unsigned amount = min_unsigned(
+                FAT16_SECTOR_SIZE,
+                size - written
+            );
+
+            for (unsigned i = 0; i < FAT16_SECTOR_SIZE; ++i) {
+                if (i < amount)
+                    sector_buffer[i] = (unsigned char)data[written + i];
+                else
+                    sector_buffer[i] = 0;
+            }
+
+            if (!write_sector(first_sector + s, sector_buffer))
+                return 0;
+
+            written += amount;
+        }
+
+        if (written >= size)
+            break;
+
+        unsigned next;
+
+        if (next_cluster(cluster, &next) != 1)
+            return 0;
+
+        cluster = next;
+    }
+
+    if (written != size)
+        return 0;
+
+    /* Update the file size in its directory entry. */
+    if (!read_sector(entry_lba, sector_buffer))
+        return 0;
+
+    sector_buffer[entry_offset + 28] =
+        (unsigned char)(size);
+
+    sector_buffer[entry_offset + 29] =
+        (unsigned char)(size >> 8);
+
+    sector_buffer[entry_offset + 30] =
+        (unsigned char)(size >> 16);
+
+    sector_buffer[entry_offset + 31] =
+        (unsigned char)(size >> 24);
+
+    if (!write_sector(entry_lba, sector_buffer))
+        return 0;
 
     return 1;
 }
