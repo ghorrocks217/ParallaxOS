@@ -15,6 +15,18 @@ struct VfsMount {
 static VfsMount mounts[VFS_MAX_MOUNTS];
 static unsigned mounted_count = 0;
 
+struct VfsFileDescriptor {
+    int used;
+    int dirty;
+    unsigned flags;
+    unsigned position;
+    unsigned size;
+    char path[VFS_PATH_MAX];
+    char data[VFS_FILE_MAX];
+};
+
+static VfsFileDescriptor file_descriptors[VFS_MAX_FDS];
+
 /* ---------------------------------------------------------
    String helpers
    --------------------------------------------------------- */
@@ -391,6 +403,15 @@ void vfs_init(void) {
 
     mounted_count = 0;
 
+    for (unsigned i = 0; i < VFS_MAX_FDS; ++i) {
+        file_descriptors[i].used = 0;
+        file_descriptors[i].dirty = 0;
+        file_descriptors[i].flags = 0;
+        file_descriptors[i].position = 0;
+        file_descriptors[i].size = 0;
+        file_descriptors[i].path[0] = '\0';
+    }
+
     ramfs_init();
 
     /* RAMFS is the root filesystem. */
@@ -552,4 +573,225 @@ int vfs_is_directory(const char *path) {
         return 0;
 
     return type == VFS_DIRECTORY;
+}
+
+/* ---------------------------------------------------------
+   File descriptor implementation
+   --------------------------------------------------------- */
+
+static int valid_fd(int fd) {
+    return fd >= 0 &&
+           fd < VFS_MAX_FDS &&
+           file_descriptors[fd].used;
+}
+
+static int flush_fd(VfsFileDescriptor *fd) {
+    if (!fd || !fd->used)
+        return 0;
+
+    if (!fd->dirty)
+        return 1;
+
+    if (!(fd->flags & VFS_O_WRITE))
+        return 0;
+
+    if (!vfs_write(fd->path, fd->data, fd->size))
+        return 0;
+
+    fd->dirty = 0;
+    return 1;
+}
+
+int vfs_open(const char *path, unsigned flags) {
+    if (!path || path[0] != '/')
+        return -1;
+
+    if (!(flags & (VFS_O_READ | VFS_O_WRITE)))
+        return -1;
+
+    if (flags & ~(VFS_O_READ | VFS_O_WRITE |
+                  VFS_O_CREATE | VFS_O_TRUNC |
+                  VFS_O_APPEND))
+        return -1;
+
+    if ((flags & VFS_O_TRUNC) &&
+        !(flags & VFS_O_WRITE))
+        return -1;
+
+    if ((flags & VFS_O_APPEND) &&
+        !(flags & VFS_O_WRITE))
+        return -1;
+
+    if (!vfs_exists(path)) {
+        if (!(flags & VFS_O_CREATE))
+            return -1;
+
+        if (!vfs_create(path))
+            return -1;
+    }
+
+    if (vfs_is_directory(path))
+        return -1;
+
+    int slot = -1;
+
+    for (unsigned i = 0; i < VFS_MAX_FDS; ++i) {
+        if (!file_descriptors[i].used) {
+            slot = (int)i;
+            break;
+        }
+    }
+
+    if (slot < 0)
+        return -1;
+
+    VfsFileDescriptor *fd = &file_descriptors[slot];
+
+    fd->used = 0;
+    fd->dirty = 0;
+    fd->flags = flags;
+    fd->position = 0;
+    fd->size = 0;
+
+    str_copy(fd->path, path, sizeof(fd->path));
+
+    for (unsigned i = 0; i < VFS_FILE_MAX; ++i)
+        fd->data[i] = 0;
+
+    if (!(flags & VFS_O_TRUNC)) {
+        int size = vfs_read(
+            path,
+            fd->data,
+            VFS_FILE_MAX
+        );
+
+        if (size < 0)
+            return -1;
+
+        fd->size = (unsigned)size;
+    } else {
+        fd->dirty = 1;
+    }
+
+    if (flags & VFS_O_APPEND)
+        fd->position = fd->size;
+
+    fd->used = 1;
+
+    return slot;
+}
+
+int vfs_read_fd(int fd, char *buffer, unsigned size) {
+    if (!valid_fd(fd) || !buffer)
+        return -1;
+
+    VfsFileDescriptor *file = &file_descriptors[fd];
+
+    if (!(file->flags & VFS_O_READ))
+        return -1;
+
+    if (file->position >= file->size)
+        return 0;
+
+    unsigned remaining = file->size - file->position;
+
+    if (size > remaining)
+        size = remaining;
+
+    for (unsigned i = 0; i < size; ++i)
+        buffer[i] = file->data[file->position + i];
+
+    file->position += size;
+
+    return (int)size;
+}
+
+int vfs_write_fd(
+    int fd,
+    const char *buffer,
+    unsigned size
+) {
+    if (!valid_fd(fd) || (!buffer && size))
+        return -1;
+
+    VfsFileDescriptor *file = &file_descriptors[fd];
+
+    if (!(file->flags & VFS_O_WRITE))
+        return -1;
+
+    if (file->position > VFS_FILE_MAX)
+        return -1;
+
+    if (size > VFS_FILE_MAX - file->position)
+        return -1;
+
+    for (unsigned i = 0; i < size; ++i)
+        file->data[file->position + i] = buffer[i];
+
+    file->position += size;
+
+    if (file->position > file->size)
+        file->size = file->position;
+
+    file->dirty = 1;
+
+    return (int)size;
+}
+
+int vfs_seek(int fd, int offset, unsigned origin) {
+    if (!valid_fd(fd))
+        return -1;
+
+    VfsFileDescriptor *file = &file_descriptors[fd];
+
+    int base;
+
+    if (origin == VFS_SEEK_SET) {
+        base = 0;
+    } else if (origin == VFS_SEEK_CUR) {
+        base = (int)file->position;
+    } else if (origin == VFS_SEEK_END) {
+        base = (int)file->size;
+    } else {
+        return -1;
+    }
+
+    int position = base + offset;
+
+    if (position < 0 || position > VFS_FILE_MAX)
+        return -1;
+
+    file->position = (unsigned)position;
+
+    return position;
+}
+
+int vfs_tell(int fd) {
+    if (!valid_fd(fd))
+        return -1;
+
+    return (int)file_descriptors[fd].position;
+}
+
+int vfs_close(int fd) {
+    if (!valid_fd(fd))
+        return 0;
+
+    VfsFileDescriptor *file = &file_descriptors[fd];
+
+    /*
+     * Keep the descriptor open if flushing fails.
+     * This allows the caller to retry.
+     */
+    if (!flush_fd(file))
+        return 0;
+
+    file->used = 0;
+    file->dirty = 0;
+    file->flags = 0;
+    file->position = 0;
+    file->size = 0;
+    file->path[0] = '\0';
+
+    return 1;
 }
