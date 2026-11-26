@@ -1080,6 +1080,177 @@ extern "C" int fat16_create(const char *path) {
     return 0;
 }
 
+
+extern "C" int fat16_mkdir(const char *path) {
+    if (!fs.mounted || !path || path[0] != '/')
+        return 0;
+
+    unsigned length = string_length(path);
+
+    if (length < 2 || length >= VFS_PATH_MAX ||
+        path[length - 1] == '/')
+        return 0;
+
+    /* Split parent path and directory name. */
+    unsigned split = length;
+
+    while (split > 0 && path[split - 1] != '/')
+        --split;
+
+    if (split == 0 || split >= length)
+        return 0;
+
+    char parent_path[VFS_PATH_MAX];
+
+    if (split == 1) {
+        parent_path[0] = '/';
+        parent_path[1] = '\0';
+    } else {
+        for (unsigned i = 0; i < split - 1; ++i)
+            parent_path[i] = path[i];
+
+        parent_path[split - 1] = '\0';
+    }
+
+    char name[13];
+    unsigned name_length = length - split;
+
+    if (name_length > 12)
+        return 0;
+
+    for (unsigned i = 0; i < name_length; ++i)
+        name[i] = path[split + i];
+
+    name[name_length] = '\0';
+
+    unsigned char short_name[11];
+
+    if (!make_short_name(name, short_name))
+        return 0;
+
+    /* Resolve parent directory. */
+    unsigned parent_cluster;
+
+    if (!resolve_directory(parent_path, &parent_cluster))
+        return 0;
+
+    /* Reject duplicate names. */
+    unsigned char existing[FAT16_ENTRY_SIZE];
+
+    if (find_entry(parent_cluster, short_name, existing, 0, 0))
+        return 0;
+
+    /* Find a free parent directory entry. */
+    unsigned max_entries;
+
+    if (parent_cluster == 0) {
+        max_entries = fs.root_entries;
+    } else {
+        max_entries = fs.cluster_count *
+            fs.sectors_per_cluster *
+            (FAT16_SECTOR_SIZE / FAT16_ENTRY_SIZE);
+    }
+
+    unsigned entry_lba = 0;
+    unsigned entry_offset = 0;
+    int found_slot = 0;
+
+    for (unsigned i = 0; i < max_entries; ++i) {
+        unsigned char entry[FAT16_ENTRY_SIZE];
+
+        int result = read_directory_entry(
+            parent_cluster,
+            i,
+            entry,
+            &entry_lba,
+            &entry_offset
+        );
+
+        if (result <= 0)
+            break;
+
+        if (entry[0] == 0x00 || entry[0] == 0xE5) {
+            found_slot = 1;
+            break;
+        }
+    }
+
+    if (!found_slot)
+        return 0;
+
+    /* Allocate and clear a cluster for the new directory. */
+    unsigned new_cluster;
+
+    if (!allocate_cluster(&new_cluster))
+        return 0;
+
+    /*
+     * Initialize the new directory's first sector.
+     * Entry 0: .
+     * Entry 1: ..
+     */
+    for (unsigned i = 0; i < FAT16_SECTOR_SIZE; ++i)
+        sector_buffer[i] = 0;
+
+    /* "." entry */
+    sector_buffer[0] = '.';
+
+    for (unsigned i = 1; i < 11; ++i)
+        sector_buffer[i] = ' ';
+
+    sector_buffer[11] = FAT16_ATTR_DIRECTORY;
+
+    sector_buffer[26] = (unsigned char)new_cluster;
+    sector_buffer[27] = (unsigned char)(new_cluster >> 8);
+
+    /* ".." entry */
+    sector_buffer[32] = '.';
+    sector_buffer[33] = '.';
+
+    for (unsigned i = 34; i < 43; ++i)
+        sector_buffer[i] = ' ';
+
+    sector_buffer[43] = FAT16_ATTR_DIRECTORY;
+
+    sector_buffer[58] = (unsigned char)parent_cluster;
+    sector_buffer[59] = (unsigned char)(parent_cluster >> 8);
+
+    if (!write_sector(cluster_to_sector(new_cluster), sector_buffer)) {
+        write_fat_entry(new_cluster, 0);
+        return 0;
+    }
+
+    /* Create the directory entry in its parent. */
+    if (!read_sector(entry_lba, sector_buffer)) {
+        write_fat_entry(new_cluster, 0);
+        return 0;
+    }
+
+    for (unsigned i = 0; i < FAT16_ENTRY_SIZE; ++i)
+        sector_buffer[entry_offset + i] = 0;
+
+    for (unsigned i = 0; i < 11; ++i)
+        sector_buffer[entry_offset + i] = short_name[i];
+
+    sector_buffer[entry_offset + 11] = FAT16_ATTR_DIRECTORY;
+
+    sector_buffer[entry_offset + 20] = 0;
+    sector_buffer[entry_offset + 21] = 0;
+
+    sector_buffer[entry_offset + 26] =
+        (unsigned char)new_cluster;
+
+    sector_buffer[entry_offset + 27] =
+        (unsigned char)(new_cluster >> 8);
+
+    if (!write_sector(entry_lba, sector_buffer)) {
+        write_fat_entry(new_cluster, 0);
+        return 0;
+    }
+
+    return 1;
+}
+
 extern "C" int fat16_remove(const char *path) {
     if (!fs.mounted || !path)
         return 0;

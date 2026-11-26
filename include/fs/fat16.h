@@ -43,7 +43,7 @@ int fat16_read(
 );
 
 int fat16_create(const char *path);
-
+int fat16_mkdir(const char *path);
 int fat16_remove(const char *path);
 
 int fat16_write(

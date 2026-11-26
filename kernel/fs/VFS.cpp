@@ -58,8 +58,10 @@ int vfs_create(const char *path) {
 }
 
 int vfs_mkdir(const char *path) {
-    if (is_disk_path(path))
-        return 0;
+    if (is_disk_path(path)) {
+        const char *relative = disk_relative_path(path);
+        return fat16_mkdir(relative);
+    }
 
     return ramfs_create(path, VFS_DIRECTORY);
 }
