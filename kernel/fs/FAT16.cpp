@@ -142,6 +142,106 @@ static int next_cluster(unsigned cluster, unsigned *next) {
     return 1;
 }
 
+
+static int read_fat_entry(unsigned cluster, unsigned *value) {
+    if (!value || !valid_cluster(cluster))
+        return 0;
+
+    unsigned offset = cluster * 2;
+    unsigned lba = fs.fat_start + offset / FAT16_SECTOR_SIZE;
+    unsigned entry_offset = offset % FAT16_SECTOR_SIZE;
+
+    if (!read_sector(lba, sector_buffer))
+        return 0;
+
+    *value = read16(sector_buffer + entry_offset);
+    return 1;
+}
+
+static int write_fat_entry(unsigned cluster, unsigned value) {
+    if (!valid_cluster(cluster))
+        return 0;
+
+    unsigned offset = cluster * 2;
+    unsigned relative_sector = offset / FAT16_SECTOR_SIZE;
+    unsigned entry_offset = offset % FAT16_SECTOR_SIZE;
+
+    for (unsigned copy = 0; copy < fs.fat_count; ++copy) {
+        unsigned lba =
+            fs.fat_start +
+            copy * fs.sectors_per_fat +
+            relative_sector;
+
+        if (!read_sector(lba, sector_buffer))
+            return 0;
+
+        sector_buffer[entry_offset] =
+            (unsigned char)value;
+
+        sector_buffer[entry_offset + 1] =
+            (unsigned char)(value >> 8);
+
+        if (!write_sector(lba, sector_buffer))
+            return 0;
+    }
+
+    return 1;
+}
+
+static int zero_cluster(unsigned cluster) {
+    if (!valid_cluster(cluster))
+        return 0;
+
+    unsigned first_sector = cluster_to_sector(cluster);
+
+    for (unsigned i = 0; i < FAT16_SECTOR_SIZE; ++i)
+        sector_buffer[i] = 0;
+
+    for (unsigned i = 0; i < fs.sectors_per_cluster; ++i) {
+        if (!write_sector(first_sector + i, sector_buffer))
+            return 0;
+    }
+
+    return 1;
+}
+
+
+static int allocate_cluster(unsigned *result) {
+    if (!fs.mounted || !result)
+        return 0;
+
+    for (unsigned cluster = FAT16_CLUSTER_MIN;
+         cluster < fs.cluster_count + FAT16_CLUSTER_MIN;
+         ++cluster) {
+
+        unsigned value;
+
+        if (!read_fat_entry(cluster, &value))
+            return 0;
+
+        /* A zero FAT entry represents an unused cluster. */
+        if (value != 0)
+            continue;
+
+        /* Clear old contents before making the cluster available. */
+        if (!zero_cluster(cluster))
+            return 0;
+
+        /* Mark this cluster as the end of a new chain. */
+        if (!write_fat_entry(cluster, 0xFFFF)) {
+            /* Best-effort rollback if a FAT copy failed. */
+            write_fat_entry(cluster, 0);
+            return 0;
+        }
+
+        *result = cluster;
+        return 1;
+    }
+
+    /* No free clusters remain. */
+    return 0;
+}
+
 /*
  * Convert a FAT 8.3 directory entry into a printable name.
  * Long filename entries are deliberately skipped for now.
@@ -581,7 +681,8 @@ extern "C" int fat16_mount(unsigned device_index) {
     if (cluster_count < 4085 || cluster_count > 65524)
         return 0;
 
-    if (cluster_count * 2 > fat_size * FAT16_SECTOR_SIZE)
+    if ((cluster_count + 2) * 2 >
+        fat_size * FAT16_SECTOR_SIZE)
         return 0;
 
     fs.device.id = device_index;
