@@ -267,6 +267,49 @@ static int free_cluster_chain(unsigned first_cluster) {
     return 0;
 }
 
+
+static int shrink_cluster_chain(
+    unsigned first_cluster,
+    unsigned keep_clusters
+) {
+    if (!valid_cluster(first_cluster))
+        return 0;
+
+    /* Keep zero clusters: release the entire chain. */
+    if (keep_clusters == 0)
+        return free_cluster_chain(first_cluster);
+
+    unsigned cluster = first_cluster;
+
+    /* Find the final cluster that must remain allocated. */
+    for (unsigned i = 1; i < keep_clusters; ++i) {
+        unsigned next;
+        int result = next_cluster(cluster, &next);
+
+        if (result != 1)
+            return 0;
+
+        cluster = next;
+    }
+
+    /* Find the first cluster that should be released. */
+    unsigned next;
+    int result = next_cluster(cluster, &next);
+
+    if (result == 2)
+        return 1;
+
+    if (result != 1)
+        return 0;
+
+    /* Detach the unused tail from the file. */
+    if (!write_fat_entry(cluster, 0xFFFF))
+        return 0;
+
+    /* Release the detached clusters. */
+    return free_cluster_chain(next);
+}
+
 static int link_clusters(unsigned first, unsigned second) {
     if (!valid_cluster(first) || !valid_cluster(second))
         return 0;
@@ -1421,6 +1464,8 @@ extern "C" int fat16_write(
         ((unsigned)read16(entry + 20) << 16) |
         read16(entry + 26);
 
+    unsigned original_first_cluster = first_cluster;
+
     unsigned cluster_bytes =
         fs.sectors_per_cluster * FAT16_SECTOR_SIZE;
 
@@ -1568,6 +1613,12 @@ extern "C" int fat16_write(
     if (!read_sector(entry_lba, sector_buffer))
         return 0;
 
+    /*
+     * Zero-length files must not retain an allocated cluster chain.
+     */
+    if (size == 0)
+        first_cluster = 0;
+
     sector_buffer[entry_offset + 20] =
         (unsigned char)(first_cluster >> 16);
 
@@ -1594,6 +1645,26 @@ extern "C" int fat16_write(
 
     if (!write_sector(entry_lba, sector_buffer))
         return 0;
+
+    /*
+     * Reclaim clusters that are no longer needed.
+     *
+     * Directory metadata is updated first. If reclamation fails,
+     * the file remains valid, although disk space may be leaked.
+     */
+    if (size == 0) {
+        if (valid_cluster(original_first_cluster))
+            return free_cluster_chain(original_first_cluster);
+
+        return 1;
+    }
+
+    if (needed_clusters < existing_clusters) {
+        return shrink_cluster_chain(
+            first_cluster,
+            needed_clusters
+        );
+    }
 
     return 1;
 }
