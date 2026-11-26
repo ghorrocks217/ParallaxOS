@@ -551,12 +551,20 @@ static int read_directory_entry(
 
     unsigned cluster = root_cluster;
 
+    if (!valid_cluster(cluster))
+        return -1;
+
     for (unsigned i = 0; i < cluster_steps; ++i) {
         unsigned next;
         int result = next_cluster(cluster, &next);
 
-        if (result != 1)
+        /* A valid end-of-chain means the directory has ended. */
+        if (result == 2)
             return 0;
+
+        /* Invalid or unreadable FAT entries indicate corruption. */
+        if (result != 1)
+            return -1;
 
         cluster = next;
     }
@@ -1172,7 +1180,10 @@ extern "C" int fat16_list(
             0
         );
 
-        if (result <= 0)
+        if (result < 0)
+            return -1;
+
+        if (result == 0)
             break;
 
         if (entry[0] == 0x00)
