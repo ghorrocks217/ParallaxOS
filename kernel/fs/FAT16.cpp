@@ -234,6 +234,63 @@ static int next_cluster(unsigned cluster, unsigned *next) {
     return 1;
 }
 
+/*
+ * Validate a FAT16 cluster chain without modifying it.
+ *
+ * Returns:
+ *   0  = valid chain ending normally
+ *   1  = cyclic chain
+ *  -1  = invalid cluster, unreadable FAT, or impossible chain
+ *
+ * Floyd's tortoise-and-hare algorithm detects cycles using
+ * constant memory, without allocating a cluster bitmap.
+ */
+static int validate_cluster_chain(unsigned first_cluster) {
+    if (!valid_cluster(first_cluster))
+        return -1;
+
+    unsigned slow = first_cluster;
+    unsigned fast = first_cluster;
+
+    for (unsigned steps = 0; steps < fs.cluster_count; ++steps) {
+        unsigned next_slow;
+        int result = next_cluster(slow, &next_slow);
+
+        if (result == 2)
+            return 0;
+
+        if (result != 1)
+            return -1;
+
+        slow = next_slow;
+
+        unsigned next_fast;
+        int fast_result = next_cluster(fast, &next_fast);
+
+        if (fast_result == 2)
+            return 0;
+
+        if (fast_result != 1)
+            return -1;
+
+        fast = next_fast;
+
+        fast_result = next_cluster(fast, &next_fast);
+
+        if (fast_result == 2)
+            return 0;
+
+        if (fast_result != 1)
+            return -1;
+
+        fast = next_fast;
+
+        if (slow == fast)
+            return 1;
+    }
+
+    return -1;
+}
 
 static int read_fat_entry(unsigned cluster, unsigned *value) {
     if (!value || !valid_cluster(cluster))
@@ -342,6 +399,9 @@ static int free_cluster_chain(unsigned first_cluster) {
     if (!valid_cluster(first_cluster))
         return 0;
 
+    if (validate_cluster_chain(first_cluster) != 0)
+        return 0;
+
     unsigned cluster = first_cluster;
 
     for (unsigned steps = 0; steps < fs.cluster_count; ++steps) {
@@ -369,6 +429,9 @@ static int shrink_cluster_chain(
     unsigned keep_clusters
 ) {
     if (!valid_cluster(first_cluster))
+        return 0;
+
+    if (validate_cluster_chain(first_cluster) != 0)
         return 0;
 
     /* Keep zero clusters: release the entire chain. */
@@ -1243,7 +1306,7 @@ extern "C" int fat16_read(
         ((unsigned)read16(entry + 20) << 16) |
         read16(entry + 26);
 
-    if (!valid_cluster(cluster))
+    if (validate_cluster_chain(cluster) != 0)
         return -1;
 
     unsigned copied = 0;
@@ -1611,6 +1674,10 @@ extern "C" int fat16_remove(const char *path) {
     unsigned first_cluster =
         ((unsigned)read16(entry + 20) << 16) |
         read16(entry + 26);
+
+    if (first_cluster != 0 &&
+        validate_cluster_chain(first_cluster) != 0)
+        return 0;
 
     if (attributes & FAT16_ATTR_DIRECTORY) {
         /* Directories must have a valid data cluster. */
