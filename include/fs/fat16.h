@@ -43,6 +43,13 @@ int fat16_read(
     unsigned capacity
 );
 
+int fat16_read_at(
+    const char *path,
+    unsigned offset,
+    char *buffer,
+    unsigned size
+);
+
 int fat16_create(const char *path);
 int fat16_mkdir(const char *path);
 int fat16_remove(const char *path);

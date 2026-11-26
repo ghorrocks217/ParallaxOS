@@ -24,10 +24,23 @@ int ramfs_read(
     unsigned capacity
 );
 
+int ramfs_read_at(
+    const char *path,
+    unsigned offset,
+    char *buffer,
+    unsigned size
+);
+
 int ramfs_list(
     const char *path,
     struct vfs_dirent *entries,
     unsigned capacity
+);
+
+int ramfs_stat(
+    const char *path,
+    unsigned *type,
+    unsigned *size
 );
 
 int ramfs_exists(const char *path);

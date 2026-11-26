@@ -132,6 +132,16 @@ static int ramfs_driver_read(
     return ramfs_read(path, buffer, capacity);
 }
 
+static int ramfs_driver_read_at(
+    void *,
+    const char *path,
+    unsigned offset,
+    char *buffer,
+    unsigned size
+) {
+    return ramfs_read_at(path, offset, buffer, size);
+}
+
 static int ramfs_driver_list(
     void *,
     const char *path,
@@ -147,19 +157,7 @@ static int ramfs_driver_stat(
     unsigned *type,
     unsigned *size
 ) {
-    if (!ramfs_exists(path))
-        return 0;
-
-    if (type) {
-        *type = ramfs_is_directory(path)
-            ? VFS_DIRECTORY
-            : VFS_FILE;
-    }
-
-    if (size)
-        *size = 0;
-
-    return 1;
+    return ramfs_stat(path, type, size);
 }
 
 static const vfs_fs_ops ramfs_operations = {
@@ -169,7 +167,8 @@ static const vfs_fs_ops ramfs_operations = {
     ramfs_driver_write,
     ramfs_driver_read,
     ramfs_driver_list,
-    ramfs_driver_stat
+    ramfs_driver_stat,
+    ramfs_driver_read_at
 };
 
 /* FAT16 */
@@ -204,6 +203,16 @@ static int fat16_driver_read(
     return fat16_read(path, buffer, capacity);
 }
 
+static int fat16_driver_read_at(
+    void *,
+    const char *path,
+    unsigned offset,
+    char *buffer,
+    unsigned size
+) {
+    return fat16_read_at(path, offset, buffer, size);
+}
+
 static int fat16_driver_list(
     void *,
     const char *path,
@@ -229,7 +238,8 @@ static const vfs_fs_ops fat16_operations = {
     fat16_driver_write,
     fat16_driver_read,
     fat16_driver_list,
-    fat16_driver_stat
+    fat16_driver_stat,
+    fat16_driver_read_at
 };
 
 /* ---------------------------------------------------------
@@ -523,6 +533,29 @@ int vfs_read(
     );
 }
 
+int vfs_read_at(
+    const char *path,
+    unsigned offset,
+    char *buffer,
+    unsigned size
+) {
+    ResolvedPath resolved;
+
+    if (!resolve_path(path, &resolved))
+        return -1;
+
+    if (!resolved.mount->ops->read_at)
+        return -1;
+
+    return resolved.mount->ops->read_at(
+        resolved.mount->context,
+        resolved.relative_path,
+        offset,
+        buffer,
+        size
+    );
+}
+
 int vfs_list(
     const char *path,
     struct vfs_dirent *entries,
@@ -630,7 +663,13 @@ int vfs_open(const char *path, unsigned flags) {
             return -1;
     }
 
-    if (vfs_is_directory(path))
+    unsigned type = 0;
+    unsigned size = 0;
+
+    if (!vfs_stat(path, &type, &size))
+        return -1;
+
+    if (type != VFS_FILE)
         return -1;
 
     int slot = -1;
@@ -658,19 +697,29 @@ int vfs_open(const char *path, unsigned flags) {
     for (unsigned i = 0; i < VFS_FILE_MAX; ++i)
         fd->data[i] = 0;
 
-    if (!(flags & VFS_O_TRUNC)) {
-        int size = vfs_read(
-            path,
-            fd->data,
-            VFS_FILE_MAX
-        );
-
-        if (size < 0)
-            return -1;
-
-        fd->size = (unsigned)size;
-    } else {
+    if (flags & VFS_O_TRUNC) {
         fd->dirty = 1;
+        fd->size = 0;
+    } else {
+        fd->size = size;
+
+        /*
+         * Writable descriptors still use the existing
+         * bounded write buffer. Read-only descriptors stream.
+         */
+        if (flags & VFS_O_WRITE) {
+            if (size > VFS_FILE_MAX)
+                return -1;
+
+            int result = vfs_read(
+                path,
+                fd->data,
+                VFS_FILE_MAX
+            );
+
+            if (result < 0)
+                return -1;
+        }
     }
 
     if (flags & VFS_O_APPEND)
@@ -682,7 +731,7 @@ int vfs_open(const char *path, unsigned flags) {
 }
 
 int vfs_read_fd(int fd, char *buffer, unsigned size) {
-    if (!valid_fd(fd) || !buffer)
+    if (!valid_fd(fd) || (!buffer && size))
         return -1;
 
     VfsFileDescriptor *file = &file_descriptors[fd];
@@ -690,7 +739,7 @@ int vfs_read_fd(int fd, char *buffer, unsigned size) {
     if (!(file->flags & VFS_O_READ))
         return -1;
 
-    if (file->position >= file->size)
+    if (size == 0 || file->position >= file->size)
         return 0;
 
     unsigned remaining = file->size - file->position;
@@ -698,12 +747,30 @@ int vfs_read_fd(int fd, char *buffer, unsigned size) {
     if (size > remaining)
         size = remaining;
 
-    for (unsigned i = 0; i < size; ++i)
-        buffer[i] = file->data[file->position + i];
+    int result;
 
-    file->position += size;
+    if (file->flags & VFS_O_WRITE) {
+        /*
+         * Writable descriptors read their pending snapshot,
+         * preserving read-after-write behavior.
+         */
+        for (unsigned i = 0; i < size; ++i)
+            buffer[i] = file->data[file->position + i];
 
-    return (int)size;
+        result = (int)size;
+    } else {
+        result = vfs_read_at(
+            file->path,
+            file->position,
+            buffer,
+            size
+        );
+    }
+
+    if (result > 0)
+        file->position += (unsigned)result;
+
+    return result;
 }
 
 int vfs_write_fd(
@@ -794,4 +861,22 @@ int vfs_close(int fd) {
     file->path[0] = '\0';
 
     return 1;
+}
+
+int vfs_stat(
+    const char *path,
+    unsigned *type,
+    unsigned *size
+) {
+    ResolvedPath resolved;
+
+    if (!resolve_path(path, &resolved))
+        return 0;
+
+    return resolved.mount->ops->stat(
+        resolved.mount->context,
+        resolved.relative_path,
+        type,
+        size
+    );
 }

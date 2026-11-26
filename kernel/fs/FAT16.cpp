@@ -1449,6 +1449,108 @@ extern "C" int fat16_read(
     return copied == file_size ? (int)copied : -1;
 }
 
+
+extern "C" int fat16_read_at(
+    const char *path,
+    unsigned offset,
+    char *buffer,
+    unsigned size
+) {
+    if (!fs.mounted || !path || (!buffer && size))
+        return -1;
+
+    unsigned parent_cluster;
+    unsigned char entry[FAT16_ENTRY_SIZE];
+
+    if (!resolve_file(path, &parent_cluster, entry, 0, 0))
+        return -1;
+
+    if (entry[11] & FAT16_ATTR_DIRECTORY)
+        return -1;
+
+    unsigned file_size = read32(entry + 28);
+
+    if (offset >= file_size || size == 0)
+        return 0;
+
+    unsigned remaining = file_size - offset;
+
+    if (size > remaining)
+        size = remaining;
+
+    unsigned cluster =
+        ((unsigned)read16(entry + 20) << 16) |
+        read16(entry + 26);
+
+    if (!valid_cluster(cluster))
+        return -1;
+
+    if (validate_cluster_chain(cluster) != 0)
+        return -1;
+
+    unsigned cluster_bytes =
+        fs.sectors_per_cluster * FAT16_SECTOR_SIZE;
+
+    unsigned skip_clusters = offset / cluster_bytes;
+    unsigned position_in_cluster = offset % cluster_bytes;
+
+    for (unsigned i = 0; i < skip_clusters; ++i) {
+        unsigned next;
+        int result = next_cluster(cluster, &next);
+
+        if (result != 1)
+            return -1;
+
+        cluster = next;
+    }
+
+    unsigned copied = 0;
+
+    while (copied < size) {
+        unsigned sector_in_cluster =
+            position_in_cluster / FAT16_SECTOR_SIZE;
+
+        unsigned sector_offset =
+            position_in_cluster % FAT16_SECTOR_SIZE;
+
+        unsigned lba =
+            cluster_to_sector(cluster) + sector_in_cluster;
+
+        if (!read_sector(lba, sector_buffer))
+            return -1;
+
+        unsigned amount =
+            FAT16_SECTOR_SIZE - sector_offset;
+
+        if (amount > size - copied)
+            amount = size - copied;
+
+        for (unsigned i = 0; i < amount; ++i) {
+            buffer[copied + i] =
+                (char)sector_buffer[sector_offset + i];
+        }
+
+        copied += amount;
+        position_in_cluster += amount;
+
+        if (copied >= size)
+            break;
+
+        if (position_in_cluster >= cluster_bytes) {
+            unsigned next;
+            int result = next_cluster(cluster, &next);
+
+            if (result != 1)
+                return -1;
+
+            cluster = next;
+            position_in_cluster = 0;
+        }
+    }
+
+    return (int)copied;
+}
+
 extern "C" int fat16_stat(
     const char *path,
     unsigned *type,

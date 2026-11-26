@@ -68,6 +68,14 @@ struct vfs_fs_ops {
         unsigned *type,
         unsigned *size
     );
+
+    int (*read_at)(
+        void *context,
+        const char *path,
+        unsigned offset,
+        char *buffer,
+        unsigned size
+    );
 };
 
 #ifdef __cplusplus
@@ -101,6 +109,19 @@ int vfs_read(
     const char *path,
     char *buffer,
     unsigned capacity
+);
+
+int vfs_read_at(
+    const char *path,
+    unsigned offset,
+    char *buffer,
+    unsigned size
+);
+
+int vfs_stat(
+    const char *path,
+    unsigned *type,
+    unsigned *size
 );
 
 int vfs_list(

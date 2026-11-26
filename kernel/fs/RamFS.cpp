@@ -248,6 +248,37 @@ int ramfs_read(
     return (int)node->size;
 }
 
+int ramfs_read_at(
+    const char *path,
+    unsigned offset,
+    char *buffer,
+    unsigned size
+) {
+    if (!path || (!buffer && size))
+        return -1;
+
+    int index = find_node(path);
+
+    if (index < 0 || nodes[index].type != VFS_FILE)
+        return -1;
+
+    RamNode *node = &nodes[index];
+
+    if (offset >= node->size)
+        return 0;
+
+    unsigned remaining = node->size - offset;
+
+    if (size > remaining)
+        size = remaining;
+
+    for (unsigned i = 0; i < size; ++i)
+        buffer[i] = node->data[offset + i];
+
+    return (int)size;
+}
+
+
 int ramfs_list(
     const char *path,
     struct vfs_dirent *entries,
@@ -315,4 +346,35 @@ int ramfs_is_directory(const char *path) {
 
     return index >= 0 &&
            nodes[index].type == VFS_DIRECTORY;
+}
+
+int ramfs_stat(
+    const char *path,
+    unsigned *type,
+    unsigned *size
+) {
+    if (!path)
+        return 0;
+
+    int index = find_node(path);
+
+    if (index < 0)
+        return 0;
+
+    if (type)
+        *type = nodes[index].type;
+
+    if (size)
+        *size = nodes[index].size;
+
+    return 1;
+}
+
+static int ramfs_driver_stat(
+    void *,
+    const char *path,
+    unsigned *type,
+    unsigned *size
+) {
+    return ramfs_stat(path, type, size);
 }
