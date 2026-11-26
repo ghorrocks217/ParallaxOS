@@ -1888,6 +1888,38 @@ static void cmd_fatinfo(void) {
     kprintf("  Data clusters:       %u\n", info.cluster_count);
 }
 
+static void cmd_fatcheck(void) {
+    struct fat16_info info;
+
+    if (!fat16_get_info(&info)) {
+        kputs("No FAT16 filesystem mounted.\n");
+        return;
+    }
+
+    if (info.fat_count < 2) {
+        kputs("Only one FAT copy exists. No mirror to compare.\n");
+        return;
+    }
+
+    unsigned mismatches = 0;
+
+    int result = fat16_check_mirrors(&mismatches);
+
+    if (result < 0) {
+        kputs("FAT mirror check failed: disk read error.\n");
+        return;
+    }
+
+    if (mismatches == 0) {
+        kputs("FAT mirror check passed. Copies match.\n");
+    } else {
+        kprintf(
+            "WARNING: %u FAT sectors differ between copies!\n",
+            mismatches
+        );
+    }
+}
+
 static void cmd_fatls(const char *argument) {
     const char *path =
         argument && *argument ? argument : "/";
@@ -2014,7 +2046,8 @@ static void run_command(char *input) {
               "  disktest        test disk sector read/write\n"
               "  fatinfo         show mounted FAT16 filesystem information\n"
               "  fatls [path]    list a FAT16 directory\n"
-              "  fatcat <path>   read a FAT16 file\n");
+              "  fatcat <path>   read a FAT16 file\n"
+              "  fatcheck        compare FAT16 allocation table copies\n");
     } else if (streq(cmd, "clear")) {
         clear();
     } else if (streq(cmd, "echo")) {
@@ -2105,6 +2138,8 @@ static void run_command(char *input) {
         cmd_fatls(args);
     } else if (streq(cmd, "fatcat")) {
         cmd_fatcat(args);
+    } else if (streq(cmd, "fatcheck")) {
+        cmd_fatcheck();
     } else {
         kprintf("unknown command: %s (try 'help')\n", cmd);
     }

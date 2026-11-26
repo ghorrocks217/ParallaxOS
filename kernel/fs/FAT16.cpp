@@ -1216,6 +1216,56 @@ extern "C" int fat16_get_info(struct fat16_info *info) {
     return 1;
 }
 
+extern "C" int fat16_check_mirrors(
+    unsigned *mismatched_sectors
+) {
+    if (!fs.mounted || !mismatched_sectors)
+        return -1;
+
+    *mismatched_sectors = 0;
+
+    // A single FAT has no mirror to compare.
+    if (fs.fat_count < 2)
+        return 1;
+
+    static unsigned char primary[FAT16_SECTOR_SIZE];
+    static unsigned char mirror[FAT16_SECTOR_SIZE];
+
+    for (unsigned sector = 0;
+         sector < fs.sectors_per_fat;
+         ++sector) {
+
+        unsigned primary_lba =
+            fs.fat_start + sector;
+
+        unsigned mirror_lba =
+            fs.fat_start + fs.sectors_per_fat + sector;
+
+        if (!read_sector(primary_lba, primary))
+            return -1;
+
+        if (!read_sector(mirror_lba, mirror))
+            return -1;
+
+        int matches = 1;
+
+        for (unsigned i = 0;
+             i < FAT16_SECTOR_SIZE;
+             ++i) {
+
+            if (primary[i] != mirror[i]) {
+                matches = 0;
+                break;
+            }
+        }
+
+        if (!matches)
+            ++(*mismatched_sectors);
+    }
+
+    return 1;
+}
+
 extern "C" int fat16_list(
     const char *path,
     struct vfs_dirent *entries,
