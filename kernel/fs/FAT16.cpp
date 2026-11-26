@@ -7,6 +7,7 @@
 #define FAT16_ATTR_DIRECTORY 0x10
 #define FAT16_ATTR_VOLUME    0x08
 #define FAT16_ATTR_LONG_NAME 0x0F
+#define FAT16_ATTR_READ_ONLY 0x01
 
 #define FAT16_CLUSTER_EOC    0xFFF8
 #define FAT16_CLUSTER_BAD    0xFFF7
@@ -760,6 +761,7 @@ static int find_entry(
  * Resolve a directory path to its first cluster.
  * Cluster zero is reserved here as the fixed FAT16 root directory.
  */
+
 static int resolve_directory(
     const char *path,
     unsigned *result_cluster
@@ -792,12 +794,48 @@ static int resolve_directory(
 
         component[length] = '\0';
 
+        /* Current directory: do nothing. */
         if (string_equal_ci(component, "."))
             continue;
 
+        /* Parent of root is still root. */
         if (string_equal_ci(component, "..")) {
-            /* Parent traversal is handled conservatively. */
-            return 0;
+            if (current == 0)
+                continue;
+
+            unsigned char parent_entry[FAT16_ENTRY_SIZE];
+
+            /*
+             * The second directory entry is "..".
+             * It stores the parent directory's cluster.
+             */
+            if (read_directory_entry(
+                    current,
+                    1,
+                    parent_entry,
+                    0,
+                    0) != 1)
+                return 0;
+
+            /* Verify that this really is a ".." entry. */
+            if (parent_entry[0] != '.' ||
+                parent_entry[1] != '.' ||
+                parent_entry[2] != ' ')
+                return 0;
+
+            if (!(parent_entry[11] & FAT16_ATTR_DIRECTORY))
+                return 0;
+
+            unsigned parent =
+                ((unsigned)read16(parent_entry + 20) << 16) |
+                read16(parent_entry + 26);
+
+            /* Cluster zero represents the FAT16 root directory. */
+            if (parent != 0 && !valid_cluster(parent))
+                return 0;
+
+            current = parent;
+            continue;
         }
 
         unsigned char short_name[11];
@@ -812,7 +850,9 @@ static int resolve_directory(
         if (!(entry[11] & FAT16_ATTR_DIRECTORY))
             return 0;
 
-        current = read16(entry + 26);
+        current =
+            ((unsigned)read16(entry + 20) << 16) |
+            read16(entry + 26);
 
         if (!valid_cluster(current))
             return 0;
@@ -1517,7 +1557,7 @@ extern "C" int fat16_remove(const char *path) {
     unsigned attributes = entry[11];
 
     /* Never remove read-only or volume-label entries. */
-    if (attributes & (0x01 | FAT16_ATTR_VOLUME))
+    if (entry[11] & (FAT16_ATTR_READ_ONLY | FAT16_ATTR_DIRECTORY))
         return 0;
 
     unsigned first_cluster =
@@ -1627,7 +1667,7 @@ extern "C" int fat16_write(
             &entry_offset))
         return 0;
 
-    if (entry[11] & (0x01 | FAT16_ATTR_DIRECTORY))
+    if (entry[11] & (FAT16_ATTR_READ_ONLY | FAT16_ATTR_DIRECTORY))
         return 0;
 
     unsigned first_cluster =
