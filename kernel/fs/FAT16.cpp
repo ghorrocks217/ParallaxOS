@@ -450,6 +450,102 @@ static int read_directory_entry(
     return 1;
 }
 
+/*
+ * Find an unused directory entry.
+ *
+ * If a subdirectory has no free entries, allocate another
+ * cluster and append it to the directory's cluster chain.
+ *
+ * The FAT16 root directory has a fixed size and cannot grow.
+ */
+static int find_directory_slot(
+    unsigned directory_cluster,
+    unsigned *entry_lba,
+    unsigned *entry_offset
+) {
+    if (!entry_lba || !entry_offset)
+        return 0;
+
+    unsigned entries_per_cluster =
+        fs.sectors_per_cluster *
+        (FAT16_SECTOR_SIZE / FAT16_ENTRY_SIZE);
+
+    unsigned max_entries;
+
+    if (directory_cluster == 0) {
+        max_entries = fs.root_entries;
+    } else {
+        max_entries = fs.cluster_count * entries_per_cluster;
+    }
+
+    /* Search for an existing free or deleted entry. */
+    for (unsigned i = 0; i < max_entries; ++i) {
+        unsigned char entry[FAT16_ENTRY_SIZE];
+        unsigned lba;
+        unsigned offset;
+
+        int result = read_directory_entry(
+            directory_cluster,
+            i,
+            entry,
+            &lba,
+            &offset
+        );
+
+        if (result < 0)
+            return 0;
+
+        if (result == 0)
+            break;
+
+        if (entry[0] == 0x00 || entry[0] == 0xE5) {
+            *entry_lba = lba;
+            *entry_offset = offset;
+            return 1;
+        }
+    }
+
+    /* The fixed-size root directory cannot be expanded. */
+    if (directory_cluster == 0)
+        return 0;
+
+    /* Find the final cluster in this directory. */
+    unsigned last_cluster = directory_cluster;
+
+    for (unsigned i = 0; i < fs.cluster_count; ++i) {
+        unsigned next;
+        int result = next_cluster(last_cluster, &next);
+
+        if (result == 2)
+            break;
+
+        if (result != 1)
+            return 0;
+
+        last_cluster = next;
+
+        if (i == fs.cluster_count - 1)
+            return 0;
+    }
+
+    /* Allocate a new cluster for additional entries. */
+    unsigned new_cluster;
+
+    if (!allocate_cluster(&new_cluster))
+        return 0;
+
+    /* Append it to the directory's cluster chain. */
+    if (!link_clusters(last_cluster, new_cluster)) {
+        write_fat_entry(new_cluster, 0);
+        return 0;
+    }
+
+    *entry_lba = cluster_to_sector(new_cluster);
+    *entry_offset = 0;
+
+    return 1;
+}
+
 static int find_entry(
     unsigned directory_cluster,
     const unsigned char name[11],
@@ -1018,66 +1114,32 @@ extern "C" int fat16_create(const char *path) {
     /*
      * Find an unused or deleted directory entry.
      */
-    unsigned max_entries;
+    unsigned entry_lba;
+    unsigned entry_offset;
 
-    if (directory_cluster == 0) {
-        max_entries = fs.root_entries;
-    } else {
-        max_entries = fs.cluster_count *
-            fs.sectors_per_cluster *
-            (FAT16_SECTOR_SIZE / FAT16_ENTRY_SIZE);
-    }
-
-    for (unsigned i = 0; i < max_entries; ++i) {
-        unsigned char entry[FAT16_ENTRY_SIZE];
-        unsigned entry_lba;
-        unsigned entry_offset;
-
-        int result = read_directory_entry(
+    if (!find_directory_slot(
             directory_cluster,
-            i,
-            entry,
             &entry_lba,
-            &entry_offset
-        );
+            &entry_offset))
+        return 0;
 
-        if (result <= 0)
-            break;
+    /* Read the sector containing the directory entry. */
+    if (!read_sector(entry_lba, sector_buffer))
+        return 0;
 
-        if (entry[0] != 0x00 && entry[0] != 0xE5)
-            continue;
+    /* Initialize the new FAT directory entry. */
+    for (unsigned j = 0; j < FAT16_ENTRY_SIZE; ++j)
+        sector_buffer[entry_offset + j] = 0;
 
-        /*
-         * Read the sector containing the directory entry.
-         */
-        if (!read_sector(entry_lba, sector_buffer))
-            return 0;
+    for (unsigned j = 0; j < 11; ++j)
+        sector_buffer[entry_offset + j] = short_name[j];
 
-        /*
-         * Initialize a new FAT directory entry.
-         */
-        for (unsigned j = 0; j < FAT16_ENTRY_SIZE; ++j)
-            sector_buffer[entry_offset + j] = 0;
+    sector_buffer[entry_offset + 11] = 0x20;
 
-        for (unsigned j = 0; j < 11; ++j)
-            sector_buffer[entry_offset + j] = short_name[j];
+    if (!write_sector(entry_lba, sector_buffer))
+        return 0;
 
-        /* Archive attribute: regular file. */
-        sector_buffer[entry_offset + 11] = 0x20;
-
-        /* Empty file: no cluster and zero size. */
-        sector_buffer[entry_offset + 26] = 0;
-        sector_buffer[entry_offset + 27] = 0;
-
-        sector_buffer[entry_offset + 28] = 0;
-        sector_buffer[entry_offset + 29] = 0;
-        sector_buffer[entry_offset + 30] = 0;
-        sector_buffer[entry_offset + 31] = 0;
-
-        return write_sector(entry_lba, sector_buffer);
-    }
-
-    return 0;
+    return 1;
 }
 
 
@@ -1141,43 +1203,14 @@ extern "C" int fat16_mkdir(const char *path) {
         return 0;
 
     /* Find a free parent directory entry. */
-    unsigned max_entries;
+    unsigned entry_lba;
+    unsigned entry_offset;
 
-    if (parent_cluster == 0) {
-        max_entries = fs.root_entries;
-    } else {
-        max_entries = fs.cluster_count *
-            fs.sectors_per_cluster *
-            (FAT16_SECTOR_SIZE / FAT16_ENTRY_SIZE);
-    }
-
-    unsigned entry_lba = 0;
-    unsigned entry_offset = 0;
-    int found_slot = 0;
-
-    for (unsigned i = 0; i < max_entries; ++i) {
-        unsigned char entry[FAT16_ENTRY_SIZE];
-
-        int result = read_directory_entry(
+    if (!find_directory_slot(
             parent_cluster,
-            i,
-            entry,
             &entry_lba,
-            &entry_offset
-        );
-
-        if (result <= 0)
-            break;
-
-        if (entry[0] == 0x00 || entry[0] == 0xE5) {
-            found_slot = 1;
-            break;
-        }
-    }
-
-    if (!found_slot)
+            &entry_offset))
         return 0;
-
     /* Allocate and clear a cluster for the new directory. */
     unsigned new_cluster;
 
