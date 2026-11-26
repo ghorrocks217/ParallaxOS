@@ -1847,6 +1847,8 @@ static void cmd_fatinfo(void) {
     kputs("FAT16 filesystem:\n");
 
     kprintf("  Device:              IDE %u\n", info.device);
+    kprintf("  Partition start:     LBA %u\n",
+            info.partition_start_sector);
     kprintf("  Size:                %u MB\n",
             (unsigned)(bytes / (1024ULL * 1024ULL)));
     kprintf("  Total sectors:       %u\n", info.total_sectors);

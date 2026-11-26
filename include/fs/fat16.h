@@ -5,6 +5,7 @@
 
 struct fat16_info {
     unsigned device;
+    unsigned partition_start_sector;
     unsigned total_sectors;
     unsigned sectors_per_cluster;
     unsigned reserved_sectors;

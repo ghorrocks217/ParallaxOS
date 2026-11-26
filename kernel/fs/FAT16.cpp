@@ -16,6 +16,7 @@ struct Fat16State {
     int mounted;
     block_device device;
 
+    unsigned partition_start;
     unsigned total_sectors;
     unsigned sectors_per_cluster;
     unsigned reserved_sectors;
@@ -159,23 +160,41 @@ static int string_equal_ci(const char *a, const char *b) {
 }
 
 static int read_sector(unsigned lba, void *buffer) {
-    if (!fs.mounted)
+    if (!fs.mounted || !buffer)
         return 0;
 
-    if (lba >= fs.device.sector_count)
+    if (lba >= fs.total_sectors)
         return 0;
 
-    return fs.device.read(fs.device.id, lba, 1, buffer);
+    if (fs.partition_start > fs.device.sector_count ||
+        lba >= fs.device.sector_count - fs.partition_start)
+        return 0;
+
+    return fs.device.read(
+        fs.device.id,
+        fs.partition_start + lba,
+        1,
+        buffer
+    );
 }
 
 static int write_sector(unsigned lba, const void *buffer) {
     if (!fs.mounted || !buffer)
         return 0;
 
-    if (lba >= fs.device.sector_count)
+    if (lba >= fs.total_sectors)
         return 0;
 
-    return fs.device.write(fs.device.id, lba, 1, buffer);
+    if (fs.partition_start > fs.device.sector_count ||
+        lba >= fs.device.sector_count - fs.partition_start)
+        return 0;
+
+    return fs.device.write(
+        fs.device.id,
+        fs.partition_start + lba,
+        1,
+        (void *)buffer
+    );
 }
 
 static unsigned cluster_to_sector(unsigned cluster) {
@@ -867,7 +886,32 @@ static int resolve_file(
     );
 }
 
-extern "C" int fat16_mount(unsigned device_index) {
+static int is_fat16_boot_sector(const unsigned char *boot) {
+    if (boot[510] != 0x55 || boot[511] != 0xAA)
+        return 0;
+
+    unsigned bytes_per_sector = read16(boot + 11);
+    unsigned sectors_per_cluster = boot[13];
+    unsigned reserved = read16(boot + 14);
+    unsigned fats = boot[16];
+    unsigned root_entries = read16(boot + 17);
+    unsigned total16 = read16(boot + 19);
+    unsigned fat_size = read16(boot + 22);
+    unsigned total32 = read32(boot + 32);
+
+    unsigned total = total16 ? total16 : total32;
+
+    return bytes_per_sector == FAT16_SECTOR_SIZE &&
+           power_of_two(sectors_per_cluster) &&
+           sectors_per_cluster <= 128 &&
+           reserved != 0 &&
+           fats >= 1 && fats <= 2 &&
+           root_entries != 0 &&
+           fat_size != 0 &&
+           total != 0;
+}
+
+int fat16_mount(unsigned device_index) {
     fs.mounted = 0;
     fat_cache_invalidate();
 
@@ -877,14 +921,61 @@ extern "C" int fat16_mount(unsigned device_index) {
     if (fs.device.sector_count == 0)
         return 0;
 
-    unsigned char boot[512];
+    unsigned char boot[FAT16_SECTOR_SIZE];
+    unsigned partition_start = 0;
+    unsigned partition_sectors = fs.device.sector_count;
 
-    if (!fs.device.read(
-            fs.device.id, 0, 1, boot))
+    /* Read sector zero: either a superfloppy BPB or an MBR. */
+    if (!fs.device.read(fs.device.id, 0, 1, boot))
         return 0;
 
-    if (boot[510] != 0x55 || boot[511] != 0xAA)
-        return 0;
+    if (!is_fat16_boot_sector(boot)) {
+        /* Sector zero is not a valid FAT16 boot sector. Try its MBR. */
+        if (boot[510] != 0x55 || boot[511] != 0xAA)
+            return 0;
+
+        int found = 0;
+
+        for (unsigned i = 0; i < 4; ++i) {
+            unsigned char *entry = boot + 446 + i * 16;
+
+            unsigned type = entry[4];
+            unsigned start = read32(entry + 8);
+            unsigned count = read32(entry + 12);
+
+            /* FAT16 partition types: small, standard, and LBA. */
+            if (type != 0x04 && type != 0x06 && type != 0x0E)
+                continue;
+
+            if (start == 0 || count == 0)
+                continue;
+
+            if (start >= fs.device.sector_count ||
+                count > fs.device.sector_count - start)
+                continue;
+
+            unsigned char candidate[FAT16_SECTOR_SIZE];
+
+            if (!fs.device.read(
+                    fs.device.id, start, 1, candidate))
+                continue;
+
+            if (!is_fat16_boot_sector(candidate))
+                continue;
+
+            partition_start = start;
+            partition_sectors = count;
+
+            for (unsigned j = 0; j < FAT16_SECTOR_SIZE; ++j)
+                boot[j] = candidate[j];
+
+            found = 1;
+            break;
+        }
+
+        if (!found)
+            return 0;
+    }
 
     unsigned bytes_per_sector = read16(boot + 11);
     unsigned sectors_per_cluster = boot[13];
@@ -906,7 +997,7 @@ extern "C" int fat16_mount(unsigned device_index) {
         root_entries == 0 ||
         fat_size == 0 ||
         total == 0 ||
-        total > fs.device.sector_count)
+        total > partition_sectors)
         return 0;
 
     unsigned root_sectors =
@@ -934,6 +1025,7 @@ extern "C" int fat16_mount(unsigned device_index) {
         return 0;
 
     fs.device.id = device_index;
+    fs.partition_start = partition_start;
     fs.total_sectors = total;
     fs.sectors_per_cluster = sectors_per_cluster;
     fs.reserved_sectors = reserved;
@@ -959,6 +1051,7 @@ extern "C" int fat16_get_info(struct fat16_info *info) {
         return 0;
 
     info->device = fs.device.id;
+    info->partition_start_sector = fs.partition_start;
     info->total_sectors = fs.total_sectors;
     info->sectors_per_cluster = fs.sectors_per_cluster;
     info->reserved_sectors = fs.reserved_sectors;
