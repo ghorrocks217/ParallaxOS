@@ -1301,22 +1301,82 @@ extern "C" int fat16_remove(const char *path) {
             &entry_offset))
         return 0;
 
-    /* Directories and read-only files cannot be removed here. */
-    if (entry[11] & (FAT16_ATTR_DIRECTORY | 0x01))
+    unsigned attributes = entry[11];
+
+    /* Never remove read-only or volume-label entries. */
+    if (attributes & (0x01 | FAT16_ATTR_VOLUME))
         return 0;
 
     unsigned first_cluster =
         ((unsigned)read16(entry + 20) << 16) |
         read16(entry + 26);
 
-    /* Only zero or valid FAT16 data clusters are accepted. */
-    if (first_cluster != 0 && !valid_cluster(first_cluster))
-        return 0;
+    if (attributes & FAT16_ATTR_DIRECTORY) {
+        /* Directories must have a valid data cluster. */
+        if (!valid_cluster(first_cluster))
+            return 0;
+
+        unsigned entries_per_cluster =
+            fs.sectors_per_cluster *
+            (FAT16_SECTOR_SIZE / FAT16_ENTRY_SIZE);
+
+        unsigned max_entries =
+            fs.cluster_count * entries_per_cluster;
+
+        /* Verify that the directory is empty. */
+        for (unsigned i = 0; i < max_entries; ++i) {
+            unsigned char child[FAT16_ENTRY_SIZE];
+
+            int result = read_directory_entry(
+                first_cluster,
+                i,
+                child,
+                0,
+                0
+            );
+
+            if (result < 0)
+                return 0;
+
+            if (result == 0)
+                break;
+
+            if (child[0] == 0x00)
+                break;
+
+            if (child[0] == 0xE5)
+                continue;
+
+            if (child[11] == FAT16_ATTR_LONG_NAME)
+                continue;
+
+            if (child[11] & FAT16_ATTR_VOLUME)
+                continue;
+
+            /* Ignore the mandatory "." and ".." entries. */
+            int is_dot =
+                child[0] == '.' &&
+                child[1] == ' ';
+
+            int is_dotdot =
+                child[0] == '.' &&
+                child[1] == '.' &&
+                child[2] == ' ';
+
+            if (is_dot || is_dotdot)
+                continue;
+
+            /* A real entry means the directory isn't empty. */
+            return 0;
+        }
+    } else {
+        /* Files may have no cluster, but nonzero clusters must be valid. */
+        if (first_cluster != 0 && !valid_cluster(first_cluster))
+            return 0;
+    }
 
     /*
-     * Mark the directory entry deleted first.
-     * If freeing clusters later fails, this may leak space,
-     * but it won't leave a live file pointing at freed clusters.
+     * Mark the parent directory entry deleted first.
      */
     if (!read_sector(entry_lba, sector_buffer))
         return 0;
