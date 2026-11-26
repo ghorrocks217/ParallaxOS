@@ -840,6 +840,8 @@ extern "C" int fat16_write(
         size / cluster_bytes +
         (size % cluster_bytes != 0);
 
+    if (needed_clusters > fs.cluster_count)
+        return 0;
     /*
      * This first implementation only overwrites files using
      * their existing cluster chain. It does not allocate clusters.
@@ -850,14 +852,23 @@ extern "C" int fat16_write(
 
     /* Verify that the existing chain is large enough. */
     unsigned cluster = first_cluster;
+    unsigned available_clusters = 0;
 
-    for (unsigned i = 1; i < needed_clusters; ++i) {
-        unsigned next;
-
-        if (next_cluster(cluster, &next) != 1)
+    if (needed_clusters) {
+        if (!valid_cluster(cluster))
             return 0;
 
-        cluster = next;
+        available_clusters = 1;
+
+        while (available_clusters < needed_clusters) {
+            unsigned next;
+
+            if (next_cluster(cluster, &next) != 1)
+                return 0;
+
+            cluster = next;
+            ++available_clusters;
+        }
     }
 
     /*
