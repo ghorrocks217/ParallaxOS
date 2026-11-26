@@ -942,6 +942,143 @@ extern "C" int fat16_stat(
     return 1;
 }
 
+extern "C" int fat16_create(const char *path) {
+    if (!fs.mounted || !path || path[0] != '/')
+        return 0;
+
+    unsigned length = string_length(path);
+
+    if (length < 2 || length >= VFS_PATH_MAX ||
+        path[length - 1] == '/')
+        return 0;
+
+    /*
+     * Split the path into parent directory and filename.
+     */
+    unsigned split = length;
+
+    while (split > 0 && path[split - 1] != '/')
+        --split;
+
+    if (split == 0 || split >= length)
+        return 0;
+
+    char parent_path[VFS_PATH_MAX];
+
+    if (split == 1) {
+        parent_path[0] = '/';
+        parent_path[1] = '\0';
+    } else {
+        for (unsigned i = 0; i < split - 1; ++i)
+            parent_path[i] = path[i];
+
+        parent_path[split - 1] = '\0';
+    }
+
+    char filename[13];
+    unsigned filename_length = length - split;
+
+    if (filename_length > 12)
+        return 0;
+
+    for (unsigned i = 0; i < filename_length; ++i)
+        filename[i] = path[split + i];
+
+    filename[filename_length] = '\0';
+
+    /*
+     * Convert the filename to FAT 8.3 format.
+     */
+    unsigned char short_name[11];
+
+    if (!make_short_name(filename, short_name))
+        return 0;
+
+    /*
+     * Resolve the parent directory.
+     */
+    unsigned directory_cluster;
+
+    if (!resolve_directory(parent_path, &directory_cluster))
+        return 0;
+
+    /*
+     * Reject duplicate filenames.
+     */
+    unsigned char existing[FAT16_ENTRY_SIZE];
+
+    if (find_entry(
+            directory_cluster,
+            short_name,
+            existing,
+            0,
+            0))
+        return 0;
+
+    /*
+     * Find an unused or deleted directory entry.
+     */
+    unsigned max_entries;
+
+    if (directory_cluster == 0) {
+        max_entries = fs.root_entries;
+    } else {
+        max_entries = fs.cluster_count *
+            fs.sectors_per_cluster *
+            (FAT16_SECTOR_SIZE / FAT16_ENTRY_SIZE);
+    }
+
+    for (unsigned i = 0; i < max_entries; ++i) {
+        unsigned char entry[FAT16_ENTRY_SIZE];
+        unsigned entry_lba;
+        unsigned entry_offset;
+
+        int result = read_directory_entry(
+            directory_cluster,
+            i,
+            entry,
+            &entry_lba,
+            &entry_offset
+        );
+
+        if (result <= 0)
+            break;
+
+        if (entry[0] != 0x00 && entry[0] != 0xE5)
+            continue;
+
+        /*
+         * Read the sector containing the directory entry.
+         */
+        if (!read_sector(entry_lba, sector_buffer))
+            return 0;
+
+        /*
+         * Initialize a new FAT directory entry.
+         */
+        for (unsigned j = 0; j < FAT16_ENTRY_SIZE; ++j)
+            sector_buffer[entry_offset + j] = 0;
+
+        for (unsigned j = 0; j < 11; ++j)
+            sector_buffer[entry_offset + j] = short_name[j];
+
+        /* Archive attribute: regular file. */
+        sector_buffer[entry_offset + 11] = 0x20;
+
+        /* Empty file: no cluster and zero size. */
+        sector_buffer[entry_offset + 26] = 0;
+        sector_buffer[entry_offset + 27] = 0;
+
+        sector_buffer[entry_offset + 28] = 0;
+        sector_buffer[entry_offset + 29] = 0;
+        sector_buffer[entry_offset + 30] = 0;
+        sector_buffer[entry_offset + 31] = 0;
+
+        return write_sector(entry_lba, sector_buffer);
+    }
+
+    return 0;
+}
 
 extern "C" int fat16_write(
     const char *path,

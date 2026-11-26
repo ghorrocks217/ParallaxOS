@@ -48,8 +48,11 @@ void vfs_init(void) {
 }
 
 int vfs_create(const char *path) {
-    if (is_disk_path(path))
-        return 0;
+    if (is_disk_path(path)) {
+        const char *relative = disk_relative_path(path);
+
+        return fat16_create(relative);
+    }
 
     return ramfs_create(path, VFS_FILE);
 }
