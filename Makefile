@@ -72,7 +72,7 @@ kernel/cpu/usermode.o: kernel/cpu/usermode.asm
 kernel/storage/BlockDevice.o: kernel/storage/BlockDevice.cpp include/storage/block_device.h include/drivers/ata.h
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
-kernel/fs/VFS.o: kernel/fs/VFS.cpp include/fs/vfs.h include/fs/ramfs.h
+kernel/fs/VFS.o: kernel/fs/VFS.cpp include/fs/vfs.h include/fs/ramfs.h include/fs/fat16.h
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 kernel/fs/RamFS.o: kernel/fs/RamFS.cpp include/fs/ramfs.h include/fs/vfs.h

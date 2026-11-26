@@ -706,3 +706,51 @@ extern "C" int fat16_read(
 
     return copied == file_size ? (int)copied : -1;
 }
+
+extern "C" int fat16_stat(
+    const char *path,
+    unsigned *type,
+    unsigned *size
+) {
+    if (!fs.mounted || !path || path[0] != '/')
+        return 0;
+
+    /* The FAT16 root is always a directory. */
+    if (string_equal_ci(path, "/")) {
+        if (type)
+            *type = VFS_DIRECTORY;
+
+        if (size)
+            *size = 0;
+
+        return 1;
+    }
+
+    unsigned directory_cluster;
+
+    if (resolve_directory(path, &directory_cluster)) {
+        if (type)
+            *type = VFS_DIRECTORY;
+
+        if (size)
+            *size = 0;
+
+        return 1;
+    }
+
+    unsigned parent_cluster;
+    unsigned char entry[FAT16_ENTRY_SIZE];
+
+    if (!resolve_file(path, &parent_cluster, entry))
+        return 0;
+
+    if (type) {
+        *type = (entry[11] & FAT16_ATTR_DIRECTORY)
+            ? VFS_DIRECTORY : VFS_FILE;
+    }
+
+    if (size)
+        *size = read32(entry + 28);
+
+    return 1;
+}

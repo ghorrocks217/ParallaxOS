@@ -30,6 +30,12 @@ int fat16_list(
     unsigned capacity
 );
 
+int fat16_stat(
+    const char *path,
+    unsigned *type,
+    unsigned *size
+);
+
 int fat16_read(
     const char *path,
     char *buffer,
