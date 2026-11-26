@@ -768,6 +768,9 @@ static int find_entry(
     if (directory_cluster == 0) {
         max_entries = fs.root_entries;
     } else {
+        if (validate_cluster_chain(directory_cluster) != 0)
+            return -1;
+
         max_entries = fs.cluster_count *
             fs.sectors_per_cluster *
             (FAT16_SECTOR_SIZE / FAT16_ENTRY_SIZE);
@@ -787,7 +790,10 @@ static int find_entry(
             &current_offset
         );
 
-        if (result <= 0)
+        if (result < 0)
+            return -1;
+
+        if (result == 0)
             return 0;
 
         if (entry[0] == 0x00)
@@ -827,6 +833,7 @@ static int find_entry(
 
     return 0;
 }
+
 
 /*
  * Resolve a directory path to its first cluster.
@@ -918,7 +925,7 @@ static int resolve_directory(
         if (!find_entry(current, short_name, entry, 0, 0))
             return 0;
 
-        if (!(entry[11] & FAT16_ATTR_DIRECTORY))
+        if (find_entry(current, short_name, entry, 0, 0) != 1)
             return 0;
 
         current =
@@ -1464,12 +1471,15 @@ extern "C" int fat16_create(const char *path) {
      */
     unsigned char existing[FAT16_ENTRY_SIZE];
 
-    if (find_entry(
-            directory_cluster,
-            short_name,
-            existing,
-            0,
-            0))
+    int existing_result = find_entry(
+        directory_cluster,
+        short_name,
+        existing,
+        0,
+        0
+    );
+
+    if (existing_result != 0)
         return 0;
 
     /*
@@ -1563,7 +1573,15 @@ extern "C" int fat16_mkdir(const char *path) {
     /* Reject duplicate names. */
     unsigned char existing[FAT16_ENTRY_SIZE];
 
-    if (find_entry(parent_cluster, short_name, existing, 0, 0))
+    int existing_result = find_entry(
+        parent_cluster,
+        short_name,
+        existing,
+        0,
+        0
+    );
+
+    if (existing_result != 0)
         return 0;
 
     /* Find a free parent directory entry. */
