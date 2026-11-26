@@ -1178,7 +1178,7 @@ static char kb_getc(void) {
     }
 }
 
-#define LINE_MAX 128
+#define LINE_MAX 2048
 static char line[LINE_MAX];
 
 static void read_line(void) {
@@ -1744,11 +1744,6 @@ static void cmd_write(char *argument) {
     }
 
     unsigned size = fs_strlen(argument);
-
-    if (size > VFS_FILE_MAX) {
-        kputs("file is too large (maximum 512 bytes)\n");
-        return;
-    }
 
     if (!vfs_write(path, argument, size))
         kputs("write failed\n");
