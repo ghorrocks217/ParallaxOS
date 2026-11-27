@@ -17,12 +17,10 @@ static unsigned mounted_count = 0;
 
 struct VfsFileDescriptor {
     int used;
-    int dirty;
     unsigned flags;
     unsigned position;
     unsigned size;
     char path[VFS_PATH_MAX];
-    char data[VFS_FILE_MAX];
 };
 
 static VfsFileDescriptor file_descriptors[VFS_MAX_FDS];
@@ -426,41 +424,26 @@ static int resolve_path(
    --------------------------------------------------------- */
 
 void vfs_init(void) {
-    for (unsigned i = 0; i < VFS_MAX_MOUNTS; ++i) {
-        mounts[i].used = 0;
-        mounts[i].path[0] = '\0';
-        mounts[i].ops = 0;
-        mounts[i].context = 0;
-    }
-
-    mounted_count = 0;
-
     for (unsigned i = 0; i < VFS_MAX_FDS; ++i) {
         file_descriptors[i].used = 0;
-        file_descriptors[i].dirty = 0;
         file_descriptors[i].flags = 0;
         file_descriptors[i].position = 0;
         file_descriptors[i].size = 0;
         file_descriptors[i].path[0] = '\0';
     }
 
+    mounted_count = 0;
+
     ramfs_init();
 
     /* RAMFS is the root filesystem. */
     vfs_mount("/", &ramfs_operations, 0);
 
-    /*
-     * Create the mount-point directory before mounting FAT16.
-     * This preserves the directory entry visible in RAMFS.
-     */
+    /* Mount FAT16 when available. */
     if (fat16_is_mounted()) {
         ramfs_create("/disk", VFS_DIRECTORY);
 
-        vfs_mount(
-            "/disk",
-            &fat16_operations,
-            0
-        );
+        vfs_mount("/disk", &fat16_operations, 0);
     }
 }
 
@@ -585,6 +568,36 @@ int vfs_read_at(
     );
 }
 
+int vfs_write_at(
+    const char *path,
+    unsigned offset,
+    const char *buffer,
+    unsigned size
+) {
+    if (!buffer && size)
+        return -1;
+
+    if (offset > 0x7FFFFFFFu ||
+        size > 0x7FFFFFFFu - offset)
+        return -1;
+
+    ResolvedPath resolved;
+
+    if (!resolve_path(path, &resolved))
+        return -1;
+
+    if (!resolved.mount->ops->write_at)
+        return -1;
+
+    return resolved.mount->ops->write_at(
+        resolved.mount->context,
+        resolved.relative_path,
+        offset,
+        buffer,
+        size
+    );
+}
+
 int vfs_truncate(
     const char *path,
     unsigned size
@@ -659,6 +672,7 @@ int vfs_is_directory(const char *path) {
     return type == VFS_DIRECTORY;
 }
 
+
 /* ---------------------------------------------------------
    File descriptor implementation
    --------------------------------------------------------- */
@@ -667,23 +681,6 @@ static int valid_fd(int fd) {
     return fd >= 0 &&
            fd < VFS_MAX_FDS &&
            file_descriptors[fd].used;
-}
-
-static int flush_fd(VfsFileDescriptor *fd) {
-    if (!fd || !fd->used)
-        return 0;
-
-    if (!fd->dirty)
-        return 1;
-
-    if (!(fd->flags & VFS_O_WRITE))
-        return 0;
-
-    if (!vfs_write(fd->path, fd->data, fd->size))
-        return 0;
-
-    fd->dirty = 0;
-    return 1;
 }
 
 int vfs_open(const char *path, unsigned flags) {
@@ -717,11 +714,15 @@ int vfs_open(const char *path, unsigned flags) {
     unsigned type = 0;
     unsigned size = 0;
 
-    if (!vfs_stat(path, &type, &size))
+    if (!vfs_stat(path, &type, &size) || type != VFS_FILE)
         return -1;
 
-    if (type != VFS_FILE)
-        return -1;
+    if (flags & VFS_O_TRUNC) {
+        if (!vfs_truncate(path, 0))
+            return -1;
+
+        size = 0;
+    }
 
     int slot = -1;
 
@@ -738,43 +739,14 @@ int vfs_open(const char *path, unsigned flags) {
     VfsFileDescriptor *fd = &file_descriptors[slot];
 
     fd->used = 0;
-    fd->dirty = 0;
     fd->flags = flags;
     fd->position = 0;
-    fd->size = 0;
+    fd->size = size;
 
     str_copy(fd->path, path, sizeof(fd->path));
 
-    for (unsigned i = 0; i < VFS_FILE_MAX; ++i)
-        fd->data[i] = 0;
-
-    if (flags & VFS_O_TRUNC) {
-        fd->dirty = 1;
-        fd->size = 0;
-    } else {
-        fd->size = size;
-
-        /*
-         * Writable descriptors still use the existing
-         * bounded write buffer. Read-only descriptors stream.
-         */
-        if (flags & VFS_O_WRITE) {
-            if (size > VFS_FILE_MAX)
-                return -1;
-
-            int result = vfs_read(
-                path,
-                fd->data,
-                VFS_FILE_MAX
-            );
-
-            if (result < 0)
-                return -1;
-        }
-    }
-
     if (flags & VFS_O_APPEND)
-        fd->position = fd->size;
+        fd->position = size;
 
     fd->used = 1;
 
@@ -790,33 +762,30 @@ int vfs_read_fd(int fd, char *buffer, unsigned size) {
     if (!(file->flags & VFS_O_READ))
         return -1;
 
-    if (size == 0 || file->position >= file->size)
+    if (size == 0)
         return 0;
 
-    unsigned remaining = file->size - file->position;
+    unsigned actual_size = 0;
+
+    if (!vfs_stat(file->path, 0, &actual_size))
+        return -1;
+
+    file->size = actual_size;
+
+    if (file->position >= actual_size)
+        return 0;
+
+    unsigned remaining = actual_size - file->position;
 
     if (size > remaining)
         size = remaining;
 
-    int result;
-
-    if (file->flags & VFS_O_WRITE) {
-        /*
-         * Writable descriptors read their pending snapshot,
-         * preserving read-after-write behavior.
-         */
-        for (unsigned i = 0; i < size; ++i)
-            buffer[i] = file->data[file->position + i];
-
-        result = (int)size;
-    } else {
-        result = vfs_read_at(
-            file->path,
-            file->position,
-            buffer,
-            size
-        );
-    }
+    int result = vfs_read_at(
+        file->path,
+        file->position,
+        buffer,
+        size
+    );
 
     if (result > 0)
         file->position += (unsigned)result;
@@ -837,25 +806,40 @@ int vfs_write_fd(
     if (!(file->flags & VFS_O_WRITE))
         return -1;
 
-    if (file->position > VFS_FILE_MAX)
+    if (size == 0)
+        return 0;
+
+    if (file->flags & VFS_O_APPEND) {
+        unsigned actual_size = 0;
+
+        if (!vfs_stat(file->path, 0, &actual_size))
+            return -1;
+
+        file->position = actual_size;
+        file->size = actual_size;
+    }
+
+    if (file->position > 0x7FFFFFFFu ||
+        size > 0x7FFFFFFFu - file->position)
         return -1;
 
-    if (size > VFS_FILE_MAX - file->position)
+    int result = vfs_write_at(
+        file->path,
+        file->position,
+        buffer,
+        size
+    );
+
+    if (result < 0)
         return -1;
 
-    for (unsigned i = 0; i < size; ++i)
-        file->data[file->position + i] = buffer[i];
-
-    file->position += size;
+    file->position += (unsigned)result;
 
     if (file->position > file->size)
         file->size = file->position;
 
-    file->dirty = 1;
-
-    return (int)size;
+    return result;
 }
-
 
 int vfs_seek(int fd, int offset, unsigned origin) {
     if (!valid_fd(fd))
@@ -870,7 +854,13 @@ int vfs_seek(int fd, int offset, unsigned origin) {
     } else if (origin == VFS_SEEK_CUR) {
         base = file->position;
     } else if (origin == VFS_SEEK_END) {
-        base = file->size;
+        unsigned actual_size = 0;
+
+        if (!vfs_stat(file->path, 0, &actual_size))
+            return -1;
+
+        file->size = actual_size;
+        base = actual_size;
     } else {
         return -1;
     }
@@ -878,9 +868,6 @@ int vfs_seek(int fd, int offset, unsigned origin) {
     unsigned position;
 
     if (offset < 0) {
-        /*
-         * Avoid negating INT_MIN directly.
-         */
         unsigned magnitude =
             (unsigned)(-(offset + 1)) + 1;
 
@@ -897,24 +884,10 @@ int vfs_seek(int fd, int offset, unsigned origin) {
         position = base + amount;
     }
 
-    /*
-     * Read-only descriptors can seek throughout the
-     * entire file. Writable descriptors remain bounded
-     * until streaming writes are implemented.
-     */
-    unsigned limit =
-        (file->flags & VFS_O_WRITE)
-            ? VFS_FILE_MAX
-            : file->size;
-
-    if (position > limit)
-        return -1;
-
     file->position = position;
 
     return (int)position;
 }
-
 
 int vfs_tell(int fd) {
     if (!valid_fd(fd))
@@ -929,15 +902,7 @@ int vfs_close(int fd) {
 
     VfsFileDescriptor *file = &file_descriptors[fd];
 
-    /*
-     * Keep the descriptor open if flushing fails.
-     * This allows the caller to retry.
-     */
-    if (!flush_fd(file))
-        return 0;
-
     file->used = 0;
-    file->dirty = 0;
     file->flags = 0;
     file->position = 0;
     file->size = 0;
@@ -945,6 +910,7 @@ int vfs_close(int fd) {
 
     return 1;
 }
+
 
 int vfs_stat(
     const char *path,
