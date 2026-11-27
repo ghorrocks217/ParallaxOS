@@ -424,6 +424,13 @@ static int resolve_path(
    --------------------------------------------------------- */
 
 void vfs_init(void) {
+    for (unsigned i = 0; i < VFS_MAX_MOUNTS; ++i) {
+        mounts[i].used = 0;
+        mounts[i].path[0] = '\0';
+        mounts[i].ops = 0;
+        mounts[i].context = 0;
+    }
+
     for (unsigned i = 0; i < VFS_MAX_FDS; ++i) {
         file_descriptors[i].used = 0;
         file_descriptors[i].flags = 0;
